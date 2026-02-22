@@ -1,0 +1,22 @@
+{
+  "name": "solai-widget-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "SolAI Widget - Embed universal con ElevenLabs ElevenAgents (voz + chat)",
+  "workspaces": ["widget", "server"],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:widget\"",
+    "dev:server": "npm run dev -w server",
+    "dev:widget": "npm run dev -w widget",
+    "build": "npm run build -w widget",
+    "preview": "npm run build && npm run start -w server",
+    "postinstall": "echo 'Configura .env con ELEVENLABS_API_KEY antes de ejecutar'"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=18"
+  }
+}

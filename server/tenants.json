@@ -1,0 +1,34 @@
+{
+  "demo-gestoria": {
+    "agentId": "agent_4901khbsjs8tfmfsybvkfhhp0t68",
+    "branding": {
+      "name": "Gestoría Demo",
+      "primaryColor": "#2563eb",
+      "logoUrl": ""
+    }
+  },
+  "demo-dental": {
+    "agentId": "agent_9801khbsbydnfywb6h8nhk9me27h",
+    "branding": {
+      "name": "Clínica Dental Demo",
+      "primaryColor": "#059669",
+      "logoUrl": ""
+    }
+  },
+  "demo-taller": {
+    "agentId": "agent_9901khbrnec4e97ryd3x2p3qp9rh",
+    "branding": {
+      "name": "Taller Demo",
+      "primaryColor": "#dc2626",
+      "logoUrl": ""
+    }
+  },
+  "demo-salon": {
+    "agentId": "agent_2401khbsrhaxe6fa8e75ca4vhxsx",
+    "branding": {
+      "name": "Salón Demo",
+      "primaryColor": "#7c3aed",
+      "logoUrl": ""
+    }
+  }
+}
