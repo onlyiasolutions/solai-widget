@@ -123,7 +123,6 @@ export class SolAIWidget {
           ${showInput ? '<button class="solai-btn-send" aria-label="Enviar">↑</button>' : ""}
           ${showCall ? '<button class="solai-btn-call" aria-label="Iniciar llamada">' + ICON_PHONE + '</button>' : ""}
         </div>
-        <div class="solai-state" role="status"></div>
       </div>
       ${showCall ? `
       <div class="solai-call-view">

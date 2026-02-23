@@ -329,37 +329,6 @@ export function getStyles(primaryColor: string): string {
   min-width: 52px; min-height: 52px;
 }
 
-/* Estado */
-.solai-state {
-  padding: 8px 20px 16px;
-  font-size: 12px;
-  color: var(--solai-muted);
-  text-align: center;
-  flex-shrink: 0;
-  min-height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.solai-panel.view-call .solai-state { display: none; }
-.solai-state-text { display: inline; }
-.solai-typing-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-.solai-typing-dots span {
-  width: 5px; height: 5px;
-  border-radius: 50%;
-  background: var(--solai-muted);
-  animation: solai-dot-bounce 0.6s ease-in-out infinite;
-}
-.solai-typing-dots span:nth-child(2) { animation-delay: 0.1s; }
-.solai-typing-dots span:nth-child(3) { animation-delay: 0.2s; }
-@keyframes solai-dot-bounce {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
-  30% { transform: translateY(-4px); opacity: 1; }
-}
 </style>
 `;
 }
