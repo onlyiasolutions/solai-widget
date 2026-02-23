@@ -16,6 +16,7 @@ export type WidgetConfig = {
   position: "br" | "bl" | "tr" | "tl";
   mode: "chat" | "voice" | "voice+chat";
   primaryColor: string;
+  sessionTtlMinutes?: number;
 };
 
 export type SessionData = {
@@ -40,6 +41,9 @@ export class SolAIWidget {
   private callBtn: HTMLElement | null = null;
   private closeBtn: HTMLElement | null = null;
   private stateEl: HTMLElement | null = null;
+  private titleEl: HTMLElement | null = null;
+  private brandWrap: HTMLElement | null = null;
+  private branding: SessionData["branding"] | null = null;
   private conversation: Awaited<ReturnType<typeof Conversation.startSession>> | null = null;
   private state: WidgetState = "idle";
   private messages: Message[] = [];
@@ -48,6 +52,10 @@ export class SolAIWidget {
   private agentStreamingText = "";
   private responseTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private readonly RESPONSE_TIMEOUT_MS = 12_000;
+  private lastActivityAt = 0;
+  private inactivityCheckIntervalId: ReturnType<typeof setInterval> | null = null;
+  private inactivityTtlMs: number;
+  private sessionExpired = false;
 
   constructor(config: WidgetConfig) {
     this.config = {
@@ -55,6 +63,7 @@ export class SolAIWidget {
       position: (["br", "bl", "tr", "tl"].includes(config.position) ? config.position : "br") as WidgetConfig["position"],
       mode: (["chat", "voice", "voice+chat"].includes(config.mode) ? config.mode : "voice+chat") as WidgetConfig["mode"],
     };
+    this.inactivityTtlMs = (config.sessionTtlMinutes ?? 15) * 60 * 1000;
   }
 
   mount() {
@@ -78,9 +87,16 @@ export class SolAIWidget {
     this.button.className = "solai-btn-toggle";
     this.button.setAttribute("aria-label", "Abrir chat");
     this.button.innerHTML = `
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-      </svg>
+      <span class="solai-icon solai-icon-chat">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        </svg>
+      </span>
+      <span class="solai-icon solai-icon-chevron">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M6 9l6 6 6-6"/>
+        </svg>
+      </span>
     `;
     this.button.addEventListener("click", () => this.togglePanel());
     wrap.appendChild(this.button);
@@ -92,7 +108,9 @@ export class SolAIWidget {
     const showCall = this.config.mode !== "chat";
     this.panel.innerHTML = `
       <header class="solai-panel-header">
-        <span class="solai-panel-title">Chat</span>
+        <div class="solai-panel-brand">
+          <span class="solai-panel-title">Chat</span>
+        </div>
         <button class="solai-btn-close" aria-label="Cerrar">×</button>
       </header>
       <div class="solai-chat-view">
@@ -119,6 +137,8 @@ export class SolAIWidget {
     wrap.appendChild(this.panel);
 
     this.chatContainer = this.panel.querySelector(".solai-chat");
+    this.titleEl = this.panel.querySelector(".solai-panel-title");
+    this.brandWrap = this.panel.querySelector(".solai-panel-brand");
     this.inputEl = this.panel.querySelector(".solai-input");
     this.sendBtn = this.panel.querySelector(".solai-btn-send");
     this.callBtn = this.panel.querySelector(".solai-btn-call");
@@ -128,7 +148,7 @@ export class SolAIWidget {
     const callScreenBtn = this.panel.querySelector(".solai-call-btn");
     if (callScreenBtn) callScreenBtn.addEventListener("click", () => this.toggleCall());
 
-    this.closeBtn?.addEventListener("click", () => this.closePanel());
+    this.closeBtn?.addEventListener("click", () => this.hardClose());
     this.sendBtn?.addEventListener("click", () => this.sendText());
     this.inputEl?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.sendText();
@@ -139,6 +159,7 @@ export class SolAIWidget {
     }
 
     this.setUIForMode();
+    this.startInactivityCheck();
   }
 
   private setUIForMode() {
@@ -151,7 +172,7 @@ export class SolAIWidget {
     if (this.panel?.hidden) {
       this.openPanel();
     } else {
-      this.closePanel();
+      this.collapsePanel();
     }
   }
 
@@ -166,7 +187,7 @@ export class SolAIWidget {
     this.ensureChatSession();
   }
 
-  private closePanel() {
+  private collapsePanel() {
     this.panel?.classList.remove("solai-panel-open");
     this.panel?.classList.add("solai-panel-closing");
     this.button?.classList.remove("open");
@@ -174,8 +195,31 @@ export class SolAIWidget {
     setTimeout(() => {
       this.panel!.hidden = true;
       this.panel?.classList.remove("solai-panel-closing");
-      this.disconnect();
     }, 220);
+  }
+
+  private hardClose() {
+    this.panel?.classList.remove("solai-panel-open");
+    this.panel?.classList.add("solai-panel-closing");
+    this.button?.classList.remove("open");
+    this.button?.setAttribute("aria-label", "Abrir chat");
+    setTimeout(() => {
+      this.panel!.hidden = true;
+      this.panel?.classList.remove("solai-panel-closing");
+      this.endCurrentSession();
+      this.clearChatMessages();
+      this.sessionExpired = false;
+      this.lastActivityAt = 0;
+      this.setState("idle");
+    }, 220);
+  }
+
+  private clearChatMessages() {
+    this.messages = [];
+    if (this.chatContainer) {
+      this.chatContainer.innerHTML = "";
+    }
+    this.updateEmptyState();
   }
 
   private setState(s: WidgetState) {
@@ -226,7 +270,8 @@ export class SolAIWidget {
       const session = await this.fetchSession();
       if (DEV) console.log("[SolAI] session fetched ok");
 
-      /* Título siempre "Chat", sin mostrar branding */
+      this.branding = session.branding ?? null;
+      this.updateHeaderBranding();
 
       const conversation = await Conversation.startSession({
         signedUrl: session.signedUrl,
@@ -283,6 +328,7 @@ export class SolAIWidget {
 
       this.conversation = conversation;
       this.callActive = false;
+      this.updateLastActivity();
       this.setState("idle");
       this.updateCallButton();
       if (DEV) console.log("[SolAI] connectChat: sesión texto activa");
@@ -333,12 +379,15 @@ export class SolAIWidget {
     }
 
     this.endCurrentSession();
+    this.updateLastActivity();
 
     this.setState("connecting");
     if (DEV) console.log("[SolAI] connectCall: iniciando sesión voz");
 
     try {
       const session = await this.fetchSession();
+      this.branding = session.branding ?? null;
+      this.updateHeaderBranding();
 
       const conversation = await Conversation.startSession({
         signedUrl: session.signedUrl,
@@ -380,6 +429,7 @@ export class SolAIWidget {
 
       this.conversation = conversation;
       this.callActive = true;
+      this.updateLastActivity();
       this.setState("in_call");
       this.updateCallButton();
       if (DEV) console.log("[SolAI] connectCall: sesión voz activa");
@@ -466,6 +516,7 @@ export class SolAIWidget {
 
     const text = input.value.trim();
     input.value = "";
+    this.updateLastActivity();
     this.addMessage("user", text);
     this.setState("processing");
 
@@ -493,6 +544,10 @@ export class SolAIWidget {
   }
 
   private addMessage(role: "user" | "agent", text: string) {
+    if (role === "agent" && this.messages.length > 0) {
+      const last = this.messages[this.messages.length - 1];
+      if (last.role === "agent" && last.text.trim() === text.trim()) return;
+    }
     this.messages.push({ role, text });
     this.updateEmptyState();
     const bubble = document.createElement("div");
@@ -502,8 +557,66 @@ export class SolAIWidget {
     this.chatContainer?.scrollTo({ top: this.chatContainer.scrollHeight, behavior: "smooth" });
   }
 
+  private updateHeaderBranding() {
+    const title = this.branding?.name ?? "Chat";
+    if (this.titleEl) this.titleEl.textContent = title;
+
+    const logo = this.brandWrap?.querySelector(".solai-panel-logo");
+    if (this.branding?.logoUrl) {
+      if (logo instanceof HTMLImageElement) {
+        logo.src = this.branding.logoUrl;
+        logo.hidden = false;
+      } else if (this.brandWrap && this.titleEl) {
+        const img = document.createElement("img");
+        img.className = "solai-panel-logo";
+        img.alt = "";
+        img.src = this.branding.logoUrl;
+        this.brandWrap.insertBefore(img, this.titleEl);
+      }
+    } else if (logo) {
+      (logo as HTMLElement).hidden = true;
+    }
+  }
+
   private updateEmptyState() {
-    const empty = this.panel?.querySelector(".solai-chat-empty");
-    if (empty) (empty as HTMLElement).hidden = this.messages.length > 0;
+    const empty = this.panel?.querySelector(".solai-chat-empty") as HTMLElement | null;
+    if (empty) {
+      empty.hidden = this.messages.length > 0;
+      empty.textContent = this.sessionExpired ? "Sesión caducada, escribe para empezar" : "Escribe un mensaje…";
+    }
+  }
+
+  private updateLastActivity() {
+    this.lastActivityAt = Date.now();
+    this.sessionExpired = false;
+  }
+
+  private startInactivityCheck() {
+    this.stopInactivityCheck();
+    const intervalMs = 60_000;
+    this.inactivityCheckIntervalId = setInterval(() => {
+      if (!this.conversation || this.callActive) return;
+      if (this.lastActivityAt === 0) return;
+      if (Date.now() - this.lastActivityAt >= this.inactivityTtlMs) {
+        this.expireSession();
+      }
+    }, intervalMs);
+  }
+
+  private stopInactivityCheck() {
+    if (this.inactivityCheckIntervalId) {
+      clearInterval(this.inactivityCheckIntervalId);
+      this.inactivityCheckIntervalId = null;
+    }
+  }
+
+  private expireSession() {
+    if (!this.conversation && !this.sessionExpired) return;
+    if (DEV) console.log("[SolAI] expireSession: TTL inactividad alcanzado");
+    this.endCurrentSession();
+    this.clearChatMessages();
+    this.sessionExpired = true;
+    this.lastActivityAt = 0;
+    this.updateEmptyState();
   }
 }

@@ -53,6 +53,30 @@ export function getStyles(primaryColor: string): string {
   justify-content: center;
   transition: transform 180ms cubic-bezier(.4,0,.2,1), box-shadow 180ms cubic-bezier(.4,0,.2,1), background 180ms ease;
 }
+.solai-btn-toggle .solai-icon {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inset: 0;
+  transition: opacity 220ms cubic-bezier(.16,1,.3,1), transform 220ms cubic-bezier(.16,1,.3,1);
+}
+.solai-btn-toggle .solai-icon-chat {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+.solai-btn-toggle .solai-icon-chevron {
+  opacity: 0;
+  transform: scale(0.9) rotate(-90deg);
+}
+.solai-btn-toggle.open .solai-icon-chat {
+  opacity: 0;
+  transform: scale(0.9) rotate(-10deg);
+}
+.solai-btn-toggle.open .solai-icon-chevron {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
 .solai-btn-toggle:hover {
   transform: translateY(-2px);
   box-shadow: 0 14px 32px rgba(37,99,235,0.3);
@@ -109,6 +133,18 @@ export function getStyles(primaryColor: string): string {
   border-bottom: 1px solid var(--solai-border);
   flex-shrink: 0;
   background: var(--solai-bg);
+}
+.solai-panel-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.solai-panel-logo {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  flex-shrink: 0;
 }
 .solai-panel-title { font-weight: 600; font-size: 15px; color: var(--solai-text); }
 .solai-btn-close {

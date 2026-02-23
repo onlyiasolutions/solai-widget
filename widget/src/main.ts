@@ -6,7 +6,7 @@ import { SolAIWidget, type WidgetConfig } from "./widget";
 
 declare global {
   interface Window {
-    SOLA_WIDGET_CONFIG?: Partial<{ tenant: string; apiBase: string; position: string; mode: string; primaryColor: string }>;
+    SOLA_WIDGET_CONFIG?: Partial<{ tenant: string; apiBase: string; position: string; mode: string; primaryColor: string; sessionTtlMinutes?: number }>;
   }
 }
 
@@ -27,6 +27,11 @@ function getConfig(): WidgetConfig {
     position: (["br", "bl", "tr", "tl"].includes(pos) ? pos : "br") as "br" | "bl" | "tr" | "tl",
     mode: (["chat", "voice", "voice+chat"].includes(mode) ? mode : "voice+chat") as "chat" | "voice" | "voice+chat",
     primaryColor: (script?.hasAttribute("data-primary-color") ? script.getAttribute("data-primary-color") : null) || "#2563EB",
+    sessionTtlMinutes: (() => {
+      const attr = script?.getAttribute("data-session-ttl-minutes");
+      const n = attr != null ? parseInt(attr, 10) : (global as { sessionTtlMinutes?: number })?.sessionTtlMinutes ?? 15;
+      return isNaN(n) || n <= 0 ? 15 : n;
+    })(),
   };
 }
 
