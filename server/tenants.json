@@ -16,7 +16,7 @@
     "branding": { "name": "Salón Demo", "primaryColor": "#7c3aed", "logoUrl": "" }
   },
   "nexo-home": {
-  "agentId": "agent_5101kjae2qs5e58vayd68brssthv",
-  "branding": { "name": "Nexo Home", "primaryColor": "#7c3aeb", "logoUrl": "" }
+    "agentId": "agent_5101kjae2qs5e58vayd68brssthv",
+    "branding": { "name": "Nexo Home", "primaryColor": "#7c3aeb", "logoUrl": "" }
   }
 }
