@@ -400,9 +400,18 @@ export class SolAIWidget {
       setTimeout(resolve, 200 + Math.random() * 300)
     );
 
-    const url = `${this.config.apiBase.replace(/\/$/, "")}/api/widget/session?tenant=${encodeURIComponent(this.config.tenant)}`;
-    this.log("fetchSession: requesting signedUrl", { url, tenant: this.config.tenant });
-    const res = await fetch(url);
+    const tenant = String(this.config.tenant ?? "").trim();
+    const base = this.config.apiBase.replace(/\/$/, "");
+    const url = `${base}/api/widget/session?tenant=${encodeURIComponent(tenant)}`;
+    this.log("fetchSession: requesting signedUrl", { url, tenant });
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "x-tenant": tenant,
+        "x-solai-tenant": tenant,
+      },
+    });
     if (!res.ok) {
       let bodyText = "";
       try {
@@ -416,11 +425,20 @@ export class SolAIWidget {
       }
       let errMsg: string | undefined;
       try {
-        const parsed = JSON.parse(bodyText || "{}") as { error?: string };
-        errMsg = parsed.error;
+        const parsed = JSON.parse(bodyText || "{}") as { error?: string; message?: string };
+        errMsg = parsed.error ?? parsed.message;
       } catch {
         // ignore
       }
+
+      // Mensajes más claros para casos comunes
+      if (!errMsg && bodyText) {
+        errMsg = bodyText;
+      }
+      if (res.status === 400 && (errMsg?.toLowerCase().includes("tenant") ?? false)) {
+        throw new Error(errMsg);
+      }
+
       throw new Error(errMsg ?? `Session error: ${res.status}`);
     }
     const data = (await res.json()) as SessionData;
