@@ -1,0 +1,3 @@
+name = "solai-widget-api"
+main = "src/index.ts"
+compatibility_date = "2025-02-25"
