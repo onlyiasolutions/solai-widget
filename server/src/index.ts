@@ -1,74 +1,117 @@
+import tenants from "../tenants.json";
 
+type Branding = { name: string; primaryColor: string; logoUrl?: string };
+type TenantConfig = { agentId: string; branding: Branding };
+type TenantsMap = Record<string, TenantConfig>;
 
-import path from "node:path";
-import fs from "node:fs";
-import dotenv from "dotenv";
-
-// Load env from common locations (supports running from monorepo root or /server)
-const envCandidates = [
-  path.resolve(process.cwd(), ".env.local"),
-  path.resolve(process.cwd(), ".env"),
-  path.resolve(process.cwd(), "server/.env.local"),
-  path.resolve(process.cwd(), "server/.env"),
-];
-
-for (const p of envCandidates) {
-  if (fs.existsSync(p)) {
-    dotenv.config({ path: p, override: false });
-  }
+export interface Env {
+  // Optional, but allows /health to report if it's configured.
+  ELEVENLABS_API_KEY?: string;
 }
 
-// eslint-disable-next-line no-console
-console.log(
-  "[server] cwd=",
-  process.cwd(),
-  "ELEVENLABS_API_KEY loaded=",
-  !!process.env.ELEVENLABS_API_KEY
-);
+const TENANTS: TenantsMap = tenants as unknown as TenantsMap;
 
-import express from "express";
-import cors from "cors";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { widgetRouter } from "./routes/widget.js";
-import { rateLimiter } from "./middleware/rateLimit.js";
+function json(data: unknown, status = 200, extraHeaders: HeadersInit = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      ...extraHeaders,
+    },
+  });
+}
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT ?? 3000);
+function corsHeaders(req: Request): HeadersInit {
+  const originHeader = req.headers.get("Origin");
+  const allowOrigin = originHeader || "*";
 
-const app = express();
-const isDev = process.env.NODE_ENV !== "production";
+  const reqHeaders =
+    req.headers.get("Access-Control-Request-Headers") ||
+    "Content-Type, Authorization";
+  const reqMethod =
+    req.headers.get("Access-Control-Request-Method") || "GET,POST,OPTIONS";
 
-// CORS: solo localhost en dev
-app.use(
-  cors({
-    origin: isDev
-      ? [/^https?:\/\/localhost(:\d+)?$/, /^https?:\/\/127\.0\.0\.1(:\d+)?$/]
-      : false,
-    credentials: true,
-  })
-);
+  const headers: HeadersInit = {
+    "Access-Control-Allow-Origin": allowOrigin,
+    "Vary": "Origin",
+    "Access-Control-Allow-Headers": reqHeaders,
+    "Access-Control-Allow-Methods": reqMethod,
+  };
 
-app.use(express.json());
-app.use(rateLimiter);
+  // Only allow credentials when we echo back a specific Origin.
+  if (originHeader) {
+    (headers as Record<string, string>)["Access-Control-Allow-Credentials"] =
+      "true";
+  }
 
-// API
-app.use("/api/widget", widgetRouter);
+  return headers;
+}
 
-// Preview: servir demo y widget built
-const rootDir = join(__dirname, "..", "..");
-app.use(
-  "/solai-widget.js",
-  express.static(join(rootDir, "widget", "dist", "solai-widget.js"))
-);
-app.use(express.static(join(rootDir, "demo")));
+function withCors(req: Request, res: Response) {
+  const h = new Headers(res.headers);
+  const ch = corsHeaders(req);
+  for (const [k, v] of Object.entries(ch)) h.set(k, v as string);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+}
 
-// Health check
-app.get("/health", (_req, res) =>
-  res.json({ status: "ok", hasElevenKey: !!process.env.ELEVENLABS_API_KEY })
-);
+function getTenant(url: URL): string | null {
+  // Supports:
+  // - /api/widget/tenant/<tenant>
+  // - /api/widget/config/<tenant>
+  // - /api/widget/tenant?tenant=<tenant>
+  // - /api/widget/config?tenant=<tenant>
+  const m = url.pathname.match(/^\/api\/widget\/(tenant|config)\/(.+)$/);
+  if (m?.[2]) return decodeURIComponent(m[2]).trim();
 
-app.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`[server] Listening on http://localhost:${PORT}`);
-});
+  const q = url.searchParams.get("tenant");
+  if (q) return q.trim();
+
+  return null;
+}
+
+export default {
+  async fetch(req: Request, env: Env): Promise<Response> {
+    // Preflight
+    if (req.method === "OPTIONS") {
+      return withCors(req, new Response(null, { status: 204 }));
+    }
+
+    const url = new URL(req.url);
+
+    // Health
+    if (url.pathname === "/health") {
+      return withCors(req, json({ status: "ok", hasElevenKey: !!env.ELEVENLABS_API_KEY }));
+    }
+
+    // Tenant config
+    if (url.pathname.startsWith("/api/widget/tenant") || url.pathname.startsWith("/api/widget/config")) {
+      const tenant = getTenant(url);
+      if (!tenant) return withCors(req, json({ error: "Missing tenant" }, 400));
+
+      const cfg = TENANTS[tenant];
+      if (!cfg) return withCors(req, json({ error: "Invalid tenant" }, 400));
+
+      return withCors(req, json({ tenant, ...cfg }));
+    }
+
+    // Root (debug-friendly)
+    if (url.pathname === "/") {
+      return withCors(
+        req,
+        json({
+          status: "ok",
+          endpoints: [
+            "/health",
+            "/api/widget/tenant/<tenant>",
+            "/api/widget/config/<tenant>",
+            "/api/widget/tenant?tenant=<tenant>",
+            "/api/widget/config?tenant=<tenant>",
+          ],
+          tenants: Object.keys(TENANTS),
+        })
+      );
+    }
+
+    return withCors(req, json({ error: "Not found" }, 404));
+  },
+};
