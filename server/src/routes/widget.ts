@@ -27,6 +27,71 @@ async function loadTenants(): Promise<Record<string, TenantConfig>> {
   return tenantsCache;
 }
 
+const TZ = "Europe/Madrid";
+
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function offsetFromTZ(now: Date, timeZone: string): string {
+  // Node moderno soporta "shortOffset" y devuelve algo tipo "GMT+1" / "GMT+02:00"
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    timeZoneName: "shortOffset",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(now);
+
+  const tzName = parts.find((p) => p.type === "timeZoneName")?.value ?? "GMT+0";
+
+  // tzName: "GMT+1" | "GMT+01:00" | "GMT-3" ...
+  const m = tzName.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/i);
+  if (!m) return "+00:00";
+
+  const sign = m[1] === "-" ? "-" : "+";
+  const hh = pad2(parseInt(m[2], 10));
+  const mm = pad2(m[3] ? parseInt(m[3], 10) : 0);
+  return `${sign}${hh}:${mm}`;
+}
+
+function nowIsoInTZ(now: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  const yyyy = get("year");
+  const mm = get("month");
+  const dd = get("day");
+  const hh = get("hour");
+  const mi = get("minute");
+  const ss = get("second");
+
+  const offset = offsetFromTZ(now, timeZone);
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}${offset}`;
+}
+
+function todayHuman(now: Date, timeZone: string): string {
+  // Ej: "miércoles, 25 de febrero de 2026"
+  const s = new Intl.DateTimeFormat("es-ES", {
+    timeZone,
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(now);
+
+  // Quitamos coma para que sea más natural en prompt si quieres
+  return s.replace(",", "");
+}
+
 export const widgetRouter = Router();
 
 widgetRouter.get("/session", async (req: Request, res: Response) => {
@@ -53,7 +118,7 @@ widgetRouter.get("/session", async (req: Request, res: Response) => {
     recent.push(now);
     sessionRateLimitMap.set(ip, recent);
   } catch {
-    // Si algo falla en el rate limit, no bloqueamos la petición
+    // no bloqueamos si falla rate limit
   }
 
   const tenant = req.query.tenant as string;
@@ -65,14 +130,16 @@ widgetRouter.get("/session", async (req: Request, res: Response) => {
 
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) {
-    res.status(500).json({ error: "Server configuration error: ELEVENLABS_API_KEY not set" });
+    res
+      .status(500)
+      .json({ error: "Server configuration error: ELEVENLABS_API_KEY not set" });
     return;
   }
 
   let tenants: Record<string, TenantConfig>;
   try {
     tenants = await loadTenants();
-  } catch (e) {
+  } catch {
     res.status(500).json({ error: "Failed to load tenant configuration" });
     return;
   }
@@ -92,7 +159,9 @@ widgetRouter.get("/session", async (req: Request, res: Response) => {
     return;
   }
 
-  const url = `https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(agentId)}`;
+  const url = `https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(
+    agentId
+  )}`;
 
   try {
     const response = await fetch(url, {
@@ -117,11 +186,20 @@ widgetRouter.get("/session", async (req: Request, res: Response) => {
       return;
     }
 
+    // ✅ Dynamic variables que ElevenLabs te está pidiendo
+    const now = new Date();
+    const dynamic_variables = {
+      tz: TZ,
+      now_iso: nowIsoInTZ(now, TZ),
+      today_human: todayHuman(now, TZ),
+    };
+
     res.json({
       tenant,
       agentId,
       signedUrl,
       branding: config.branding,
+      dynamic_variables, // <-- CLAVE
     });
   } catch (e) {
     console.error("[widget] Error fetching signed URL:", e);

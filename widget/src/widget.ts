@@ -6,7 +6,9 @@
 import { Conversation } from "@elevenlabs/client";
 import { getStyles } from "./styles";
 
-const DEV = typeof location !== "undefined" && (location.hostname === "localhost" || location.hostname === "127.0.0.1");
+const DEV =
+  typeof location !== "undefined" &&
+  (location.hostname === "localhost" || location.hostname === "127.0.0.1");
 
 const ICON_PHONE = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`;
 
@@ -19,15 +21,29 @@ export type WidgetConfig = {
   sessionTtlMinutes?: number;
 };
 
+export type DynamicVars = {
+  tz: string;
+  now_iso: string;
+  today_human: string;
+};
+
 export type SessionData = {
   tenant: string;
   agentId: string;
   signedUrl: string;
   branding: { name?: string; primaryColor?: string; logoUrl?: string };
+  dynamic_variables?: DynamicVars; // <-- NUEVO
 };
 
 export type Message = { role: "user" | "agent"; text: string };
-export type WidgetState = "idle" | "connecting" | "typing" | "in_call" | "processing" | "speaking" | "error";
+export type WidgetState =
+  | "idle"
+  | "connecting"
+  | "typing"
+  | "in_call"
+  | "processing"
+  | "speaking"
+  | "error";
 
 export class SolAIWidget {
   private config: WidgetConfig;
@@ -44,6 +60,10 @@ export class SolAIWidget {
   private titleEl: HTMLElement | null = null;
   private brandWrap: HTMLElement | null = null;
   private branding: SessionData["branding"] | null = null;
+
+  // NUEVO: guardamos dynamic vars por sesión
+  private dynamicVars: DynamicVars | null = null;
+
   private conversation: Awaited<ReturnType<typeof Conversation.startSession>> | null = null;
   private state: WidgetState = "idle";
   private messages: Message[] = [];
@@ -68,13 +88,20 @@ export class SolAIWidget {
   constructor(config: WidgetConfig) {
     this.config = {
       ...config,
-      position: (["br", "bl", "tr", "tl"].includes(config.position) ? config.position : "br") as WidgetConfig["position"],
-      mode: (["chat", "voice", "voice+chat"].includes(config.mode) ? config.mode : "voice+chat") as WidgetConfig["mode"],
+      position: (["br", "bl", "tr", "tl"].includes(config.position)
+        ? config.position
+        : "br") as WidgetConfig["position"],
+      mode: (["chat", "voice", "voice+chat"].includes(config.mode)
+        ? config.mode
+        : "voice+chat") as WidgetConfig["mode"],
     };
     this.inactivityTtlMs = (config.sessionTtlMinutes ?? 15) * 60 * 1000;
 
     try {
-      if (typeof window !== "undefined" && window.localStorage?.getItem("SOLAI_DEBUG") === "1") {
+      if (
+        typeof window !== "undefined" &&
+        window.localStorage?.getItem("SOLAI_DEBUG") === "1"
+      ) {
         this.debug = true;
       } else {
         this.debug = DEV;
@@ -113,7 +140,9 @@ export class SolAIWidget {
 
   private canCreateSession(): boolean {
     const now = Date.now();
-    this.sessionCreateTimestamps = this.sessionCreateTimestamps.filter((t) => now - t < 60_000);
+    this.sessionCreateTimestamps = this.sessionCreateTimestamps.filter(
+      (t) => now - t < 60_000
+    );
 
     if (this.sessionCreateTimestamps.length >= 5) {
       this.log("Local rate limit triggered");
@@ -129,7 +158,12 @@ export class SolAIWidget {
   }
 
   private isQuotaError(input: unknown): boolean {
-    const text = typeof input === "string" ? input : typeof input === "object" && input !== null ? JSON.stringify(input) : String(input ?? "");
+    const text =
+      typeof input === "string"
+        ? input
+        : typeof input === "object" && input !== null
+          ? JSON.stringify(input)
+          : String(input ?? "");
     const lower = text.toLowerCase();
     return (
       lower.includes("quota") ||
@@ -145,10 +179,16 @@ export class SolAIWidget {
   private setQuotaBlocked(reason: string) {
     const now = Date.now();
     this.quotaBlockedUntil = now + this.QUOTA_COOLDOWN_MS;
-    this.log("quota blocked", { reason, until: new Date(this.quotaBlockedUntil).toISOString() });
+    this.log("quota blocked", {
+      reason,
+      until: new Date(this.quotaBlockedUntil).toISOString(),
+    });
     try {
       if (typeof window !== "undefined" && window.localStorage) {
-        window.localStorage.setItem("SOLAI_QUOTA_BLOCKED_UNTIL", String(this.quotaBlockedUntil));
+        window.localStorage.setItem(
+          "SOLAI_QUOTA_BLOCKED_UNTIL",
+          String(this.quotaBlockedUntil)
+        );
       }
     } catch {
       // ignorar errores de localStorage
@@ -192,7 +232,8 @@ export class SolAIWidget {
     if (!trimmed) return false;
     if (trimmed.length > 120) return false;
 
-    const re = /^(¡?hola|buenas|muy buenas|buenos días|buenas tardes|hey)[!.,\s]/i;
+    const re =
+      /^(¡?hola|buenas|muy buenas|buenos días|buenas tardes|hey)[!.,\s]/i;
     if (!re.test(trimmed)) return false;
 
     this.log("suppressing greeting", trimmed);
@@ -253,19 +294,27 @@ export class SolAIWidget {
           <div class="solai-chat-empty">Escribe un mensaje…</div>
         </div>
         <div class="solai-input-row ${!showInput ? "solai-input-row-voice" : ""}">
-          ${showInput ? '<input type="text" class="solai-input" placeholder="Escribe un mensaje…" autocomplete="off" />' : ""}
+          ${
+            showInput
+              ? '<input type="text" class="solai-input" placeholder="Escribe un mensaje…" autocomplete="off" />'
+              : ""
+          }
           ${showInput ? '<button class="solai-btn-send" aria-label="Enviar">↑</button>' : ""}
-          ${showCall ? '<button class="solai-btn-call" aria-label="Iniciar llamada">' + ICON_PHONE + '</button>' : ""}
+          ${showCall ? '<button class="solai-btn-call" aria-label="Iniciar llamada">' + ICON_PHONE + "</button>" : ""}
         </div>
       </div>
-      ${showCall ? `
+      ${
+        showCall
+          ? `
       <div class="solai-call-view">
         <div class="solai-call-status">En llamada…</div>
         <div class="solai-call-btn-wrap">
           <button class="solai-call-btn" aria-label="Colgar llamada">${ICON_PHONE}</button>
         </div>
       </div>
-      ` : ""}
+      `
+          : ""
+      }
     `;
     wrap.appendChild(this.panel);
 
@@ -371,13 +420,28 @@ export class SolAIWidget {
     const useTypingDots = s === "idle" || s === "typing" || s === "processing";
     if (this.stateEl) {
       if (useTypingDots) {
-        this.stateEl.innerHTML = '<span class="solai-typing-dots"><span></span><span></span><span></span></span>';
+        this.stateEl.innerHTML =
+          '<span class="solai-typing-dots"><span></span><span></span><span></span></span>';
       } else {
-        this.stateEl.innerHTML = labels[s] ? `<span class="solai-state-text">${labels[s]}</span>` : "";
+        this.stateEl.innerHTML = labels[s]
+          ? `<span class="solai-state-text">${labels[s]}</span>`
+          : "";
       }
     }
-    this.root?.querySelector(".solai-widget-wrap")?.classList.remove("state-idle", "state-typing", "state-listening", "state-in-call", "state-thinking", "state-processing", "state-speaking", "state-error");
-    if (s !== "idle") this.root?.querySelector(".solai-widget-wrap")?.classList.add(`state-${s.replace("_", "-")}`);
+    this.root
+      ?.querySelector(".solai-widget-wrap")
+      ?.classList.remove(
+        "state-idle",
+        "state-typing",
+        "state-listening",
+        "state-in-call",
+        "state-thinking",
+        "state-processing",
+        "state-speaking",
+        "state-error"
+      );
+    if (s !== "idle")
+      this.root?.querySelector(".solai-widget-wrap")?.classList.add(`state-${s.replace("_", "-")}`);
     this.log("state:", s, "callActive:", this.callActive);
   }
 
@@ -396,16 +460,11 @@ export class SolAIWidget {
     }
 
     // Pequeño delay humano para mitigar bots/loops
-    await new Promise((resolve) =>
-      setTimeout(resolve, 200 + Math.random() * 300)
-    );
+    await new Promise((resolve) => setTimeout(resolve, 200 + Math.random() * 300));
 
     const tenant = String(this.config.tenant ?? "").trim();
 
-    // Normaliza apiBase:
-    // - permite pasar "solai-widget-api...workers.dev" sin protocolo
-    // - elimina trailing slashes
-    // - evita duplicar "/api" si apiBase ya lo incluye
+    // Normaliza apiBase
     const baseRaw = String(this.config.apiBase ?? "").trim();
     const baseNoSlash = baseRaw.replace(/\/+$/, "");
     const base =
@@ -414,13 +473,10 @@ export class SolAIWidget {
         : `https://${baseNoSlash.replace(/^\/\//, "")}`;
 
     const apiPrefix = base.endsWith("/api") ? base : `${base}/api`;
-    const rootPrefix = base; // por si el deployment monta rutas sin /api
+    const rootPrefix = base;
 
-    // Primary endpoint (expected): returns { tenant, agentId, signedUrl, branding }
     const primaryUrl = `${apiPrefix}/widget/session?tenant=${encodeURIComponent(tenant)}`;
     const primaryUrlAlt = `${rootPrefix}/widget/session?tenant=${encodeURIComponent(tenant)}`;
-
-    // Fallback endpoint (older deployments): may return only { tenant, agentId, branding }
     const fallbackUrl = `${apiPrefix}/widget/tenant?tenant=${encodeURIComponent(tenant)}`;
     const fallbackUrlAlt = `${rootPrefix}/widget/tenant?tenant=${encodeURIComponent(tenant)}`;
 
@@ -443,21 +499,19 @@ export class SolAIWidget {
     for (const u of candidates) {
       this.log("fetchSession: trying", u);
       const r = await tryFetch(u);
-      // Si existe endpoint pero no está OK, paramos y dejamos que el bloque de error lo gestione
       if (r.status !== 404) {
         res = r;
         usedUrl = u;
         break;
       }
-      // 404 -> probamos siguiente
       res = r;
       usedUrl = u;
     }
 
-    // (res nunca será null aquí, pero mantenemos guardas por seguridad)
     if (!res) {
       throw new Error("Session error: no response");
     }
+
     if (!res.ok) {
       let bodyText = "";
       try {
@@ -465,7 +519,7 @@ export class SolAIWidget {
       } catch {
         bodyText = "";
       }
-      // Make 404s actionable: most common cause is that the Worker doesn't expose /api/widget/session.
+
       if (res.status === 404) {
         const endpointHint =
           "No existe el endpoint esperado para crear sesión. " +
@@ -474,10 +528,12 @@ export class SolAIWidget {
         const extra = bodyText ? ` Detalle: ${bodyText}` : "";
         throw new Error(`${endpointHint}${extra}`);
       }
+
       if (res.status === 402 || res.status === 429 || this.isQuotaError(bodyText)) {
         this.setQuotaBlocked(`fetchSession_http_${res.status}`);
         throw new Error("quota");
       }
+
       let errMsg: string | undefined;
       try {
         const parsed = JSON.parse(bodyText || "{}") as { error?: string; message?: string };
@@ -486,21 +542,18 @@ export class SolAIWidget {
         // ignore
       }
 
-      // Mensajes más claros para casos comunes
-      if (!errMsg && bodyText) {
-        errMsg = bodyText;
-      }
+      if (!errMsg && bodyText) errMsg = bodyText;
+
       if (res.status === 400 && (errMsg?.toLowerCase().includes("tenant") ?? false)) {
         throw new Error(errMsg);
       }
 
       throw new Error(errMsg ?? `Session error: ${res.status}`);
     }
+
     const data = (await res.json()) as Partial<SessionData>;
 
-    // Validate contract: we need a signedUrl to start ElevenLabs Conversation sessions.
     if (!data || typeof data.signedUrl !== "string" || !data.signedUrl) {
-      // If we hit the fallback endpoint, it may only return tenant config without signedUrl.
       throw new Error(
         "Respuesta del servidor sin signedUrl. " +
           "Asegúrate de que el Worker expone /api/widget/session y devuelve { signedUrl }. " +
@@ -508,24 +561,25 @@ export class SolAIWidget {
       );
     }
 
-    // Cast after validation
     const sessionData = data as SessionData;
+
+    // Guardamos branding + dynamic vars en memoria
+    this.branding = sessionData.branding ?? null;
+    this.dynamicVars = sessionData.dynamic_variables ?? null;
+
     this.totalSessionsCreated += 1;
     this.log("fetchSession: ok", {
       tenant: sessionData.tenant,
       hasBranding: !!sessionData.branding,
+      hasDynamicVars: !!sessionData.dynamic_variables,
       totalSessionsCreated: this.totalSessionsCreated,
     });
-    this.log("Session created", {
-      tenant: this.config.tenant,
-      total: this.totalSessionsCreated,
-    });
+
     return sessionData;
   }
 
   /**
    * Asegura sesión de chat activa. NO pide permisos de micrófono.
-   * Espera a que la conexión esté ready antes de enviar.
    */
   private async ensureChatSession(): Promise<boolean> {
     if (this.isQuotaBlocked()) {
@@ -552,13 +606,18 @@ export class SolAIWidget {
       const session = await this.fetchSession();
       this.log("session fetched ok");
 
-      this.branding = session.branding ?? null;
       this.updateHeaderBranding();
 
-      const conversation = await Conversation.startSession({
+      // OJO: pasamos dynamic vars con ambos nombres por compatibilidad SDK
+      const convoOpts: any = {
         signedUrl: session.signedUrl,
         connectionType: "websocket",
         textOnly: true,
+
+        // compat
+        dynamic_variables: this.dynamicVars ?? undefined,
+        dynamicVariables: this.dynamicVars ?? undefined,
+
         onMessage: (msg: { source?: string; type?: string; message?: string }) => {
           if (msg.source === "user" && msg.type === "conversation_initiation_metadata") return;
           const text = (msg as { message?: string }).message;
@@ -575,6 +634,7 @@ export class SolAIWidget {
             if (msg.source === "user") this.addMessage("user", text);
           }
         },
+
         onAgentChatResponsePart: (part: { type?: string; text?: string }) => {
           this.log("chat onAgentChatResponsePart", part.type, part.text ?? "");
           if (part.type === "start") this.agentStreamingText = "";
@@ -592,6 +652,7 @@ export class SolAIWidget {
             this.setState("idle");
           }
         },
+
         onStatusChange: (s: { status?: string }) => {
           if (s.status === "connected") {
             this.log("chat ws connected");
@@ -600,6 +661,7 @@ export class SolAIWidget {
           if (s.status === "connecting") this.setState("connecting");
           if (s.status === "disconnected") this.setState("idle");
         },
+
         onError: (err: unknown) => {
           console.error("[SolAI] ElevenLabs chat error:", err);
           const str = String(err);
@@ -615,10 +677,13 @@ export class SolAIWidget {
             this.setState("error");
           }
         },
+
         onDebug: (payload: unknown) => {
           this.log("chat onDebug", payload);
         },
-      });
+      };
+
+      const conversation = await Conversation.startSession(convoOpts);
 
       this.conversation = conversation;
       this.callActive = false;
@@ -662,7 +727,6 @@ export class SolAIWidget {
 
   /**
    * Conecta en modo LLAMADA (audio). SOLO se llama al pulsar el botón mic.
-   * Aquí sí se pide getUserMedia.
    */
   private async connectCall() {
     if (this.callActive && this.conversation) return;
@@ -695,7 +759,6 @@ export class SolAIWidget {
       } else {
         this.logVoice("mic ok but no audio track");
       }
-      // We only probe the device here; ElevenLabs SDK manages its own audio graph.
       stream.getTracks().forEach((t) => t.stop());
     } catch (err) {
       this.micPermissionDenied = true;
@@ -712,13 +775,17 @@ export class SolAIWidget {
 
     try {
       const session = await this.fetchSession();
-      this.branding = session.branding ?? null;
       this.updateHeaderBranding();
 
-      const conversation = await Conversation.startSession({
+      const convoOpts: any = {
         signedUrl: session.signedUrl,
         connectionType: "websocket",
         textOnly: false,
+
+        // compat
+        dynamic_variables: this.dynamicVars ?? undefined,
+        dynamicVariables: this.dynamicVars ?? undefined,
+
         onMessage: (msg: { source?: string; type?: string; message?: string }) => {
           if (msg.source === "user" && msg.type === "conversation_initiation_metadata") return;
           const text = (msg as { message?: string }).message;
@@ -728,11 +795,13 @@ export class SolAIWidget {
             if (msg.source === "user") this.addMessage("user", text);
           }
         },
+
         onModeChange: (m: { mode?: string }) => {
           this.logVoice("onModeChange", m.mode);
           if (m.mode === "listening") this.setState("in_call");
           else if (m.mode === "speaking") this.setState("speaking");
         },
+
         onStatusChange: (s: { status?: string }) => {
           this.logVoice("onStatusChange", s.status);
           if (s.status === "connected") this.setState("in_call");
@@ -743,6 +812,7 @@ export class SolAIWidget {
             this.setState("idle");
           }
         },
+
         onError: (err: unknown) => {
           console.error("[SolAI] ElevenLabs voice error:", err);
           const str = String(err);
@@ -757,16 +827,21 @@ export class SolAIWidget {
             this.setState("error");
           }
         },
+
         onDebug: (payload: unknown) => {
           this.logVoice("onDebug", payload);
         },
+
         onVadScore: (score: unknown) => {
           this.logVoice("onVadScore", score);
         },
+
         onAudio: (event: unknown) => {
           this.logVoice("onAudio event", event);
         },
-      });
+      };
+
+      const conversation = await Conversation.startSession(convoOpts);
 
       this.conversation = conversation;
       this.callActive = true;
@@ -825,7 +900,10 @@ export class SolAIWidget {
     const loop = () => {
       if (!this.callActive || !this.conversation) return;
       try {
-        const conv = this.conversation as { getInputVolume?: () => number; getOutputVolume?: () => number };
+        const conv = this.conversation as {
+          getInputVolume?: () => number;
+          getOutputVolume?: () => number;
+        };
         const inV = typeof conv.getInputVolume === "function" ? conv.getInputVolume() : 0;
         const outV = typeof conv.getOutputVolume === "function" ? conv.getOutputVolume() : 0;
         const vol = Math.max(inV, outV);
@@ -864,13 +942,16 @@ export class SolAIWidget {
     const text = input.value.trim();
     input.value = "";
     this.updateLastActivity();
+
     if (this.callActive) {
       this.addMessage("agent", "Termina la llamada para usar el chat por texto.");
       return;
     }
+
     if (this.firstUserMessageSentAt == null) {
       this.firstUserMessageSentAt = Date.now();
     }
+
     this.addMessage("user", text);
     this.setState("processing");
 
@@ -907,7 +988,10 @@ export class SolAIWidget {
     bubble.className = `solai-bubble solai-bubble-${role}`;
     bubble.textContent = text;
     this.chatContainer?.appendChild(bubble);
-    this.chatContainer?.scrollTo({ top: this.chatContainer.scrollHeight, behavior: "smooth" });
+    this.chatContainer?.scrollTo({
+      top: this.chatContainer.scrollHeight,
+      behavior: "smooth",
+    });
   }
 
   private updateHeaderBranding() {
@@ -935,7 +1019,9 @@ export class SolAIWidget {
     const empty = this.panel?.querySelector(".solai-chat-empty") as HTMLElement | null;
     if (empty) {
       empty.hidden = this.messages.length > 0;
-      empty.textContent = this.sessionExpired ? "Sesión caducada, escribe para empezar" : "Escribe un mensaje…";
+      empty.textContent = this.sessionExpired
+        ? "Sesión caducada, escribe para empezar"
+        : "Escribe un mensaje…";
     }
   }
 

@@ -154,7 +154,73 @@ export default {
         return withCors(req, json({ error: "ElevenLabs response missing signed_url" }, 502));
       }
 
-      return withCors(req, json({ signedUrl }));
+      const tz = "Europe/Madrid";
+      const now = new Date();
+
+      // Build an ISO string that reflects the provided IANA timezone (e.g. Europe/Madrid),
+      // including the correct UTC offset (e.g. 2026-02-25T18:29:11+01:00).
+      const pad2 = (n: number) => String(n).padStart(2, "0");
+
+      const gmtOffsetToIso = (gmt: string) => {
+        // Examples seen in the wild: "GMT+1", "GMT+01:00", "UTC+1", "UTC+01:00"
+        const m = gmt.match(/^(?:GMT|UTC)([+-])(\d{1,2})(?::?(\d{2}))?$/i);
+        if (!m) return "Z";
+        const sign = m[1];
+        const hh = pad2(parseInt(m[2], 10));
+        const mm = pad2(parseInt(m[3] || "0", 10));
+        return `${sign}${hh}:${mm}`;
+      };
+
+      const now_iso = (() => {
+        // We format parts in the target timezone and then append the timezone offset.
+        const dtf = new Intl.DateTimeFormat("en-GB", {
+          timeZone: tz,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+          timeZoneName: "shortOffset",
+        });
+
+        const parts = dtf.formatToParts(now);
+        const get = (type: string) => parts.find((p) => p.type === type)?.value || "";
+
+        const year = get("year");
+        const month = get("month");
+        const day = get("day");
+        const hour = get("hour");
+        const minute = get("minute");
+        const second = get("second");
+
+        // In most runtimes this comes as "GMT+1" / "UTC+1" / "GMT+01:00" etc.
+        const tzName = get("timeZoneName").replace(/\s/g, "");
+        const offset = gmtOffsetToIso(tzName);
+
+        return `${year}-${month}-${day}T${hour}:${minute}:${second}${offset}`;
+      })();
+
+      const today_human = new Intl.DateTimeFormat("es-ES", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+        timeZone: tz,
+      }).format(now);
+
+      return withCors(
+        req,
+        json({
+          signedUrl,
+          dynamic_variables: {
+            tz,
+            now_iso,
+            today_human,
+          },
+        })
+      );
     }
 
     // Tenant config
