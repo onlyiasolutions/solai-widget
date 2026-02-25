@@ -56,6 +56,14 @@ export class SolAIWidget {
   private inactivityCheckIntervalId: ReturnType<typeof setInterval> | null = null;
   private inactivityTtlMs: number;
   private sessionExpired = false;
+  private debug = false;
+  private quotaBlockedUntil = 0;
+  private readonly QUOTA_COOLDOWN_MS = 5 * 60 * 1000;
+  private sessionStartedAt = 0;
+  private firstUserMessageSentAt: number | null = null;
+  private suppressedGreetingOnce = false;
+  private sessionCreateTimestamps: number[] = [];
+  private totalSessionsCreated = 0;
 
   constructor(config: WidgetConfig) {
     this.config = {
@@ -64,6 +72,132 @@ export class SolAIWidget {
       mode: (["chat", "voice", "voice+chat"].includes(config.mode) ? config.mode : "voice+chat") as WidgetConfig["mode"],
     };
     this.inactivityTtlMs = (config.sessionTtlMinutes ?? 15) * 60 * 1000;
+
+    try {
+      if (typeof window !== "undefined" && window.localStorage?.getItem("SOLAI_DEBUG") === "1") {
+        this.debug = true;
+      } else {
+        this.debug = DEV;
+      }
+    } catch {
+      this.debug = DEV;
+    }
+
+    // Restaurar cooldown de cuota si existe en localStorage
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        const stored = window.localStorage.getItem("SOLAI_QUOTA_BLOCKED_UNTIL");
+        if (stored) {
+          const ts = parseInt(stored, 10);
+          if (!Number.isNaN(ts)) {
+            this.quotaBlockedUntil = ts;
+          }
+        }
+      }
+    } catch {
+      // ignorar errores de acceso a localStorage
+    }
+  }
+
+  private log(...args: unknown[]) {
+    if (!this.debug) return;
+    // eslint-disable-next-line no-console
+    console.log("[SolAI]", ...args);
+  }
+
+  private logVoice(...args: unknown[]) {
+    if (!this.debug) return;
+    // eslint-disable-next-line no-console
+    console.log("[SolAI][voice]", ...args);
+  }
+
+  private canCreateSession(): boolean {
+    const now = Date.now();
+    this.sessionCreateTimestamps = this.sessionCreateTimestamps.filter((t) => now - t < 60_000);
+
+    if (this.sessionCreateTimestamps.length >= 5) {
+      this.log("Local rate limit triggered");
+      this.addMessage(
+        "agent",
+        "El asistente está recibiendo demasiadas solicitudes. Prueba en unos segundos."
+      );
+      return false;
+    }
+
+    this.sessionCreateTimestamps.push(now);
+    return true;
+  }
+
+  private isQuotaError(input: unknown): boolean {
+    const text = typeof input === "string" ? input : typeof input === "object" && input !== null ? JSON.stringify(input) : String(input ?? "");
+    const lower = text.toLowerCase();
+    return (
+      lower.includes("quota") ||
+      lower.includes("0 credits") ||
+      lower.includes("no credits") ||
+      lower.includes("missing_credits") ||
+      lower.includes("credits remaining") ||
+      lower.includes("exceeds your quota") ||
+      lower.includes("insufficient_funds")
+    );
+  }
+
+  private setQuotaBlocked(reason: string) {
+    const now = Date.now();
+    this.quotaBlockedUntil = now + this.QUOTA_COOLDOWN_MS;
+    this.log("quota blocked", { reason, until: new Date(this.quotaBlockedUntil).toISOString() });
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        window.localStorage.setItem("SOLAI_QUOTA_BLOCKED_UNTIL", String(this.quotaBlockedUntil));
+      }
+    } catch {
+      // ignorar errores de localStorage
+    }
+    const friendly =
+      "Ahora mismo el asistente está temporalmente indisponible. Prueba en unos minutos.";
+    this.addMessage("agent", friendly);
+    this.endCurrentSession("quota");
+    this.setState("idle");
+  }
+
+  private isQuotaBlocked(): boolean {
+    const now = Date.now();
+    if (this.quotaBlockedUntil && now >= this.quotaBlockedUntil) {
+      this.quotaBlockedUntil = 0;
+      try {
+        if (typeof window !== "undefined" && window.localStorage) {
+          window.localStorage.removeItem("SOLAI_QUOTA_BLOCKED_UNTIL");
+        }
+      } catch {
+        // ignorar
+      }
+      return false;
+    }
+    return this.quotaBlockedUntil !== 0 && now < this.quotaBlockedUntil;
+  }
+
+  private shouldSuppressGreeting(text: string): boolean {
+    if (this.firstUserMessageSentAt == null) return false;
+    if (this.suppressedGreetingOnce) return false;
+    if (!this.sessionStartedAt) return false;
+
+    const now = Date.now();
+    if (now - this.sessionStartedAt > 1500) return false;
+
+    // No debe haber mensajes previos del agente
+    const agentCount = this.messages.filter((m) => m.role === "agent").length;
+    if (agentCount > 0) return false;
+
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    if (trimmed.length > 120) return false;
+
+    const re = /^(¡?hola|buenas|muy buenas|buenos días|buenas tardes|hey)[!.,\s]/i;
+    if (!re.test(trimmed)) return false;
+
+    this.log("suppressing greeting", trimmed);
+    this.suppressedGreetingOnce = true;
+    return true;
   }
 
   mount() {
@@ -183,7 +317,6 @@ export class SolAIWidget {
     requestAnimationFrame(() => {
       this.panel?.classList.add("solai-panel-open");
     });
-    this.ensureChatSession();
   }
 
   private collapsePanel() {
@@ -205,7 +338,7 @@ export class SolAIWidget {
     setTimeout(() => {
       this.panel!.hidden = true;
       this.panel?.classList.remove("solai-panel-closing");
-      this.endCurrentSession();
+      this.endCurrentSession("hard_close");
       this.clearChatMessages();
       this.sessionExpired = false;
       this.lastActivityAt = 0;
@@ -218,6 +351,9 @@ export class SolAIWidget {
     if (this.chatContainer) {
       this.chatContainer.innerHTML = "";
     }
+    this.firstUserMessageSentAt = null;
+    this.suppressedGreetingOnce = false;
+    this.sessionStartedAt = 0;
     this.updateEmptyState();
   }
 
@@ -242,17 +378,63 @@ export class SolAIWidget {
     }
     this.root?.querySelector(".solai-widget-wrap")?.classList.remove("state-idle", "state-typing", "state-listening", "state-in-call", "state-thinking", "state-processing", "state-speaking", "state-error");
     if (s !== "idle") this.root?.querySelector(".solai-widget-wrap")?.classList.add(`state-${s.replace("_", "-")}`);
-    if (DEV) console.log("[SolAI] state:", s, "callActive:", this.callActive);
+    this.log("state:", s, "callActive:", this.callActive);
   }
 
   private async fetchSession(): Promise<SessionData> {
+    if (this.isQuotaBlocked()) {
+      this.log("fetchSession: blocked by quota cooldown");
+      this.addMessage(
+        "agent",
+        "Ahora mismo el asistente está temporalmente indisponible. Prueba en unos minutos."
+      );
+      throw new Error("quota_blocked");
+    }
+
+    if (!this.canCreateSession()) {
+      throw new Error("local_rate_limit");
+    }
+
+    // Pequeño delay humano para mitigar bots/loops
+    await new Promise((resolve) =>
+      setTimeout(resolve, 200 + Math.random() * 300)
+    );
+
     const url = `${this.config.apiBase.replace(/\/$/, "")}/api/widget/session?tenant=${encodeURIComponent(this.config.tenant)}`;
+    this.log("fetchSession: requesting signedUrl", { url, tenant: this.config.tenant });
     const res = await fetch(url);
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error ?? `Session error: ${res.status}`);
+      let bodyText = "";
+      try {
+        bodyText = await res.text();
+      } catch {
+        bodyText = "";
+      }
+      if (res.status === 402 || res.status === 429 || this.isQuotaError(bodyText)) {
+        this.setQuotaBlocked(`fetchSession_http_${res.status}`);
+        throw new Error("quota");
+      }
+      let errMsg: string | undefined;
+      try {
+        const parsed = JSON.parse(bodyText || "{}") as { error?: string };
+        errMsg = parsed.error;
+      } catch {
+        // ignore
+      }
+      throw new Error(errMsg ?? `Session error: ${res.status}`);
     }
-    return res.json();
+    const data = (await res.json()) as SessionData;
+    this.totalSessionsCreated += 1;
+    this.log("fetchSession: ok", {
+      tenant: data.tenant,
+      hasBranding: !!data.branding,
+      totalSessionsCreated: this.totalSessionsCreated,
+    });
+    this.log("Session created", {
+      tenant: this.config.tenant,
+      total: this.totalSessionsCreated,
+    });
+    return data;
   }
 
   /**
@@ -260,14 +442,29 @@ export class SolAIWidget {
    * Espera a que la conexión esté ready antes de enviar.
    */
   private async ensureChatSession(): Promise<boolean> {
-    if (this.conversation && !this.callActive) return true;
+    if (this.isQuotaBlocked()) {
+      this.log("ensureChatSession: blocked by quota cooldown");
+      this.addMessage(
+        "agent",
+        "Ahora mismo el asistente está temporalmente indisponible. Prueba en unos minutos."
+      );
+      return false;
+    }
+    if (this.callActive) {
+      this.log("ensureChatSession: callActive=true, no se crea sesión de texto");
+      return false;
+    }
+    if (this.conversation) {
+      this.log("ensureChatSession: reusing existing session");
+      return true;
+    }
 
     this.setState("connecting");
-    if (DEV) console.log("[SolAI] ensureChatSession: fetching session");
+    this.log("ensureChatSession: fetching session");
 
     try {
       const session = await this.fetchSession();
-      if (DEV) console.log("[SolAI] session fetched ok");
+      this.log("session fetched ok");
 
       this.branding = session.branding ?? null;
       this.updateHeaderBranding();
@@ -279,26 +476,31 @@ export class SolAIWidget {
         onMessage: (msg: { source?: string; type?: string; message?: string }) => {
           if (msg.source === "user" && msg.type === "conversation_initiation_metadata") return;
           const text = (msg as { message?: string }).message;
-          if (DEV) console.log("[SolAI] event received: onMessage", msg.source, msg.type);
+          this.log("chat onMessage", msg.source, msg.type, text);
           if (text) {
             if (msg.source === "agent") {
               this.clearResponseTimeout();
-              this.addMessage("agent", text);
-              if (DEV) console.log("[SolAI] agent text appended");
+              if (!this.shouldSuppressGreeting(text)) {
+                this.addMessage("agent", text);
+                if (DEV) console.log("[SolAI] agent text appended");
+              }
               this.setState("idle");
             }
             if (msg.source === "user") this.addMessage("user", text);
           }
         },
         onAgentChatResponsePart: (part: { type?: string; text?: string }) => {
-          if (DEV) console.log("[SolAI] event received: onAgentChatResponsePart", part.type);
+          this.log("chat onAgentChatResponsePart", part.type, part.text ?? "");
           if (part.type === "start") this.agentStreamingText = "";
           if (part.text) this.agentStreamingText += part.text;
           if (part.type === "stop") {
             this.clearResponseTimeout();
             if (this.agentStreamingText.trim()) {
-              this.addMessage("agent", this.agentStreamingText.trim());
-              if (DEV) console.log("[SolAI] agent text appended (stream complete)");
+              const full = this.agentStreamingText.trim();
+              if (!this.shouldSuppressGreeting(full)) {
+                this.addMessage("agent", full);
+                if (DEV) console.log("[SolAI] agent text appended (stream complete)");
+              }
             }
             this.agentStreamingText = "";
             this.setState("idle");
@@ -306,15 +508,19 @@ export class SolAIWidget {
         },
         onStatusChange: (s: { status?: string }) => {
           if (s.status === "connected") {
-            if (DEV) console.log("[SolAI] ws connected");
+            this.log("chat ws connected");
             this.setState("idle");
           }
           if (s.status === "connecting") this.setState("connecting");
           if (s.status === "disconnected") this.setState("idle");
         },
         onError: (err: unknown) => {
-          console.error("[SolAI] ElevenLabs error:", err);
+          console.error("[SolAI] ElevenLabs chat error:", err);
           const str = String(err);
+          if (this.isQuotaError(str)) {
+            this.setQuotaBlocked("chat_onError");
+            return;
+          }
           if (str.includes("token") || str.includes("expir")) {
             this.disconnect();
             this.ensureChatSession();
@@ -323,19 +529,28 @@ export class SolAIWidget {
             this.setState("error");
           }
         },
+        onDebug: (payload: unknown) => {
+          this.log("chat onDebug", payload);
+        },
       });
 
       this.conversation = conversation;
       this.callActive = false;
       this.updateLastActivity();
+      this.sessionStartedAt = Date.now();
+      this.suppressedGreetingOnce = false;
       this.setState("idle");
       this.updateCallButton();
-      if (DEV) console.log("[SolAI] connectChat: sesión texto activa");
+      this.log("connectChat: sesión texto activa");
       return true;
     } catch (e) {
-      console.error("[SolAI] Connect error:", e);
-      this.addMessage("agent", `Error: ${(e as Error).message}. ¿Está el servidor corriendo?`);
-      this.setState("error");
+      console.error("[SolAI] Connect chat error:", e);
+      if (!this.isQuotaBlocked()) {
+        this.addMessage("agent", `Error: ${(e as Error).message}. ¿Está el servidor corriendo?`);
+        this.setState("error");
+      } else {
+        this.setState("idle");
+      }
       return false;
     }
   }
@@ -366,22 +581,48 @@ export class SolAIWidget {
   private async connectCall() {
     if (this.callActive && this.conversation) return;
 
-    if (DEV) console.log("[SolAI] connectCall: solicitando micrófono");
-
-    try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch {
-      this.micPermissionDenied = true;
-      this.addMessage("agent", "No se pudo acceder al micrófono. Usa el chat por texto.");
-      if (DEV) console.log("[SolAI] connectCall: permiso mic denegado");
+    if (this.isQuotaBlocked()) {
+      this.logVoice("connectCall: blocked by quota cooldown");
+      this.addMessage(
+        "agent",
+        "Ahora mismo el asistente está temporalmente indisponible. Prueba en unos minutos."
+      );
       return;
     }
 
-    this.endCurrentSession();
+    this.logVoice("connectCall: solicitando micrófono");
+
+    try {
+      const constraints: MediaStreamConstraints = {
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      };
+      this.logVoice("getUserMedia constraints", constraints);
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const track = stream.getAudioTracks()[0];
+      if (track) {
+        this.logVoice("mic ok settings", track.getSettings());
+      } else {
+        this.logVoice("mic ok but no audio track");
+      }
+      // We only probe the device here; ElevenLabs SDK manages its own audio graph.
+      stream.getTracks().forEach((t) => t.stop());
+    } catch (err) {
+      this.micPermissionDenied = true;
+      this.addMessage("agent", "No se pudo acceder al micrófono. Usa el chat por texto.");
+      this.logVoice("connectCall: permiso mic denegado", err);
+      return;
+    }
+
+    this.endCurrentSession("switch_to_call");
     this.updateLastActivity();
 
     this.setState("connecting");
-    if (DEV) console.log("[SolAI] connectCall: iniciando sesión voz");
+    this.logVoice("connectCall: iniciando sesión voz");
 
     try {
       const session = await this.fetchSession();
@@ -393,19 +634,21 @@ export class SolAIWidget {
         connectionType: "websocket",
         textOnly: false,
         onMessage: (msg: { source?: string; type?: string; message?: string }) => {
-          if (this.callActive) return;
           if (msg.source === "user" && msg.type === "conversation_initiation_metadata") return;
           const text = (msg as { message?: string }).message;
+          this.logVoice("onMessage", msg.source, msg.type, text);
           if (text) {
             if (msg.source === "agent") this.addMessage("agent", text);
             if (msg.source === "user") this.addMessage("user", text);
           }
         },
         onModeChange: (m: { mode?: string }) => {
+          this.logVoice("onModeChange", m.mode);
           if (m.mode === "listening") this.setState("in_call");
           else if (m.mode === "speaking") this.setState("speaking");
         },
         onStatusChange: (s: { status?: string }) => {
+          this.logVoice("onStatusChange", s.status);
           if (s.status === "connected") this.setState("in_call");
           if (s.status === "connecting") this.setState("connecting");
           if (s.status === "disconnected") {
@@ -415,31 +658,50 @@ export class SolAIWidget {
           }
         },
         onError: (err: unknown) => {
-          console.error("[SolAI] ElevenLabs error:", err);
+          console.error("[SolAI] ElevenLabs voice error:", err);
           const str = String(err);
+          if (this.isQuotaError(str)) {
+            this.setQuotaBlocked("voice_onError");
+            return;
+          }
           if (str.includes("token") || str.includes("expir")) {
-            this.endCurrentSession();
+            this.endCurrentSession("voice_token");
             this.connectCall();
           } else {
             this.setState("error");
           }
+        },
+        onDebug: (payload: unknown) => {
+          this.logVoice("onDebug", payload);
+        },
+        onVadScore: (score: unknown) => {
+          this.logVoice("onVadScore", score);
+        },
+        onAudio: (event: unknown) => {
+          this.logVoice("onAudio event", event);
         },
       });
 
       this.conversation = conversation;
       this.callActive = true;
       this.updateLastActivity();
+      this.sessionStartedAt = Date.now();
+      this.suppressedGreetingOnce = false;
       this.setState("in_call");
       this.updateCallButton();
-      if (DEV) console.log("[SolAI] connectCall: sesión voz activa");
+      this.logVoice("connectCall: sesión voz activa");
     } catch (e) {
-      console.error("[SolAI] Connect error:", e);
-      this.addMessage("agent", `Error: ${(e as Error).message}`);
-      this.setState("error");
+      console.error("[SolAI] Connect voice error:", e);
+      if (!this.isQuotaBlocked()) {
+        this.addMessage("agent", `Error: ${(e as Error).message}`);
+        this.setState("error");
+      } else {
+        this.setState("idle");
+      }
     }
   }
 
-  private endCurrentSession() {
+  private endCurrentSession(reason: string = "manual") {
     this.clearResponseTimeout();
     this.stopVolumePulse();
     if (this.conversation) {
@@ -448,7 +710,7 @@ export class SolAIWidget {
     }
     this.callActive = false;
     this.updateCallButton();
-    if (DEV) console.log("[SolAI] endCurrentSession: sesión cerrada");
+    this.log("endCurrentSession: sesión cerrada. reason=", reason);
   }
 
   private updateCallButton() {
@@ -505,7 +767,7 @@ export class SolAIWidget {
 
   private disconnect() {
     this.clearResponseTimeout();
-    this.endCurrentSession();
+    this.endCurrentSession("disconnect");
     this.setState("idle");
   }
 
@@ -516,6 +778,13 @@ export class SolAIWidget {
     const text = input.value.trim();
     input.value = "";
     this.updateLastActivity();
+    if (this.callActive) {
+      this.addMessage("agent", "Termina la llamada para usar el chat por texto.");
+      return;
+    }
+    if (this.firstUserMessageSentAt == null) {
+      this.firstUserMessageSentAt = Date.now();
+    }
     this.addMessage("user", text);
     this.setState("processing");
 
@@ -532,12 +801,11 @@ export class SolAIWidget {
 
   private async toggleCall() {
     if (this.callActive) {
-      if (DEV) console.log("[SolAI] toggleCall: colgar llamada");
-      this.endCurrentSession();
+      this.logVoice("toggleCall: colgar llamada");
+      this.endCurrentSession("toggle_call_hangup");
       this.setState("idle");
-      await this.ensureChatSession();
     } else {
-      if (DEV) console.log("[SolAI] toggleCall: iniciar llamada");
+      this.logVoice("toggleCall: iniciar llamada");
       await this.connectCall();
     }
   }
@@ -612,7 +880,7 @@ export class SolAIWidget {
   private expireSession() {
     if (!this.conversation && !this.sessionExpired) return;
     if (DEV) console.log("[SolAI] expireSession: TTL inactividad alcanzado");
-    this.endCurrentSession();
+    this.endCurrentSession("inactivity_ttl");
     this.clearChatMessages();
     this.sessionExpired = true;
     this.lastActivityAt = 0;

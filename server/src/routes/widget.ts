@@ -14,6 +14,9 @@ type TenantConfig = {
   };
 };
 
+// In-memory rate limit: IP -> array of timestamps (ms) for /session
+const sessionRateLimitMap = new Map<string, number[]>();
+
 let tenantsCache: Record<string, TenantConfig> | null = null;
 
 async function loadTenants(): Promise<Record<string, TenantConfig>> {
@@ -27,6 +30,32 @@ async function loadTenants(): Promise<Record<string, TenantConfig>> {
 export const widgetRouter = Router();
 
 widgetRouter.get("/session", async (req: Request, res: Response) => {
+  // Basic per-IP rate limiting: max 10 requests/minute
+  try {
+    const ip =
+      (req.headers["cf-connecting-ip"] as string | undefined) ||
+      req.ip ||
+      req.connection.remoteAddress ||
+      "unknown";
+
+    const now = Date.now();
+    const prev = sessionRateLimitMap.get(ip) ?? [];
+    const recent = prev.filter((t) => now - t < 60_000);
+
+    if (recent.length >= 10) {
+      res.status(429).json({
+        error: "rate_limited",
+        message: "Too many session requests",
+      });
+      return;
+    }
+
+    recent.push(now);
+    sessionRateLimitMap.set(ip, recent);
+  } catch {
+    // Si algo falla en el rate limit, no bloqueamos la petición
+  }
+
   const tenant = req.query.tenant as string;
 
   if (!tenant) {

@@ -14,5 +14,9 @@
   "demo-salon": {
     "agentId": "agent_2401khbsrhaxe6fa8e75ca4vhxsx",
     "branding": { "name": "Salón Demo", "primaryColor": "#7c3aed", "logoUrl": "" }
+  },
+  "nexo-home": {
+  "agentId": "agent_5101kjae2qs5e58vayd68brssthv",
+  "branding": { "name": "Nexo Home", "primaryColor": "#7c3aed", "logoUrl": "" }
   }
 }

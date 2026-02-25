@@ -7,6 +7,7 @@ import { SolAIWidget, type WidgetConfig } from "./widget";
 declare global {
   interface Window {
     SOLA_WIDGET_CONFIG?: Partial<{ tenant: string; apiBase: string; position: string; mode: string; primaryColor: string; sessionTtlMinutes?: number }>;
+    __SOLAI_WIDGET_MOUNTED__?: boolean;
   }
 }
 
@@ -29,17 +30,23 @@ function getConfig(): WidgetConfig {
     primaryColor: (script?.hasAttribute("data-primary-color") ? script.getAttribute("data-primary-color") : null) || "#2563EB",
     sessionTtlMinutes: (() => {
       const attr = script?.getAttribute("data-session-ttl-minutes");
-      const n = attr != null ? parseInt(attr, 10) : (global as { sessionTtlMinutes?: number })?.sessionTtlMinutes ?? 15;
-      return isNaN(n) || n <= 0 ? 15 : n;
+      const n = attr != null ? parseInt(attr, 10) : (global as { sessionTtlMinutes?: number })?.sessionTtlMinutes ?? 10;
+      return isNaN(n) || n <= 0 ? 10 : n;
     })(),
   };
 }
 
 // Montar widget cuando el DOM esté listo
 function init() {
+  if (typeof window !== "undefined" && window.__SOLAI_WIDGET_MOUNTED__) {
+    return;
+  }
   const config = getConfig();
   const widget = new SolAIWidget(config);
   widget.mount();
+  if (typeof window !== "undefined") {
+    window.__SOLAI_WIDGET_MOUNTED__ = true;
+  }
 }
 
 if (document.readyState === "loading") {
