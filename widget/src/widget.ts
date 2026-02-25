@@ -401,14 +401,28 @@ export class SolAIWidget {
     );
 
     const tenant = String(this.config.tenant ?? "").trim();
-    const base = this.config.apiBase.replace(/\/$/, "");
+
+    // Normaliza apiBase:
+    // - permite pasar "solai-widget-api...workers.dev" sin protocolo
+    // - elimina trailing slashes
+    // - evita duplicar "/api" si apiBase ya lo incluye
+    const baseRaw = String(this.config.apiBase ?? "").trim();
+    const baseNoSlash = baseRaw.replace(/\/+$/, "");
+    const base =
+      baseNoSlash.startsWith("http://") || baseNoSlash.startsWith("https://")
+        ? baseNoSlash
+        : `https://${baseNoSlash.replace(/^\/\//, "")}`;
+
+    const apiPrefix = base.endsWith("/api") ? base : `${base}/api`;
+    const rootPrefix = base; // por si el deployment monta rutas sin /api
 
     // Primary endpoint (expected): returns { tenant, agentId, signedUrl, branding }
-    const primaryUrl = `${base}/api/widget/session?tenant=${encodeURIComponent(tenant)}`;
+    const primaryUrl = `${apiPrefix}/widget/session?tenant=${encodeURIComponent(tenant)}`;
+    const primaryUrlAlt = `${rootPrefix}/widget/session?tenant=${encodeURIComponent(tenant)}`;
 
-    // Fallback endpoint (some deployments expose only tenant/config). If this endpoint does NOT include
-    // `signedUrl`, we will surface a clear error so you can fix the Worker routes.
-    const fallbackUrl = `${base}/api/widget/tenant?tenant=${encodeURIComponent(tenant)}`;
+    // Fallback endpoint (older deployments): may return only { tenant, agentId, branding }
+    const fallbackUrl = `${apiPrefix}/widget/tenant?tenant=${encodeURIComponent(tenant)}`;
+    const fallbackUrlAlt = `${rootPrefix}/widget/tenant?tenant=${encodeURIComponent(tenant)}`;
 
     this.log("fetchSession: requesting signedUrl", { primaryUrl, fallbackUrl, tenant });
 
@@ -422,12 +436,27 @@ export class SolAIWidget {
         },
       });
 
-    let res = await tryFetch(primaryUrl);
+    const candidates = [primaryUrl, primaryUrlAlt, fallbackUrl, fallbackUrlAlt];
+    let res: Response | null = null;
+    let usedUrl: string | null = null;
 
-    // If the primary endpoint is missing (404), try the fallback once.
-    if (res.status === 404) {
-      this.log("fetchSession: primary endpoint 404, trying fallback", { primaryUrl, fallbackUrl });
-      res = await tryFetch(fallbackUrl);
+    for (const u of candidates) {
+      this.log("fetchSession: trying", u);
+      const r = await tryFetch(u);
+      // Si existe endpoint pero no está OK, paramos y dejamos que el bloque de error lo gestione
+      if (r.status !== 404) {
+        res = r;
+        usedUrl = u;
+        break;
+      }
+      // 404 -> probamos siguiente
+      res = r;
+      usedUrl = u;
+    }
+
+    // (res nunca será null aquí, pero mantenemos guardas por seguridad)
+    if (!res) {
+      throw new Error("Session error: no response");
     }
     if (!res.ok) {
       let bodyText = "";
@@ -440,7 +469,7 @@ export class SolAIWidget {
       if (res.status === 404) {
         const endpointHint =
           "No existe el endpoint esperado para crear sesión. " +
-          "El widget intenta /api/widget/session?tenant=... (o fallback /api/widget/tenant?tenant=...). " +
+          `He intentado: ${usedUrl ?? "(desconocido)"}. ` +
           "Revisa el Worker (routes) y que `apiBase` apunte al dominio correcto.";
         const extra = bodyText ? ` Detalle: ${bodyText}` : "";
         throw new Error(`${endpointHint}${extra}`);

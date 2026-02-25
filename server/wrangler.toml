@@ -2,3 +2,7 @@ name = "solai-widget-api"
 main = "src/index.ts"
 compatibility_date = "2025-02-25"
 compatibility_flags = ["nodejs_compat"]
+
+[build]
+  [build.upload]
+  format = "modules"

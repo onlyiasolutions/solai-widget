@@ -73,6 +73,23 @@ function getTenant(url: URL): string | null {
   return null;
 }
 
+async function getTenantFromReq(req: Request, url: URL): Promise<string | null> {
+  const q = url.searchParams.get("tenant");
+  if (q) return q.trim();
+
+  // If not provided via querystring, try JSON body (POST/PUT/etc.)
+  if (req.method !== "GET") {
+    try {
+      const body: any = await req.json();
+      if (body?.tenant) return String(body.tenant).trim();
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     // Preflight
@@ -90,6 +107,56 @@ export default {
       return withCors(req, json({ status: "ok", hasElevenKey: !!env.ELEVENLABS_API_KEY }));
     }
 
+    // Session (returns { signedUrl })
+    // Use a regex match to avoid any edge cases with trailing slashes or future prefixes.
+    const isSessionRoute = /^\/(?:api\/)?widget\/session$/.test(pathname);
+
+    if (isSessionRoute) {
+      const tenant = await getTenantFromReq(req, url);
+      if (!tenant) return withCors(req, json({ error: "Missing tenant" }, 400));
+
+      const cfg = TENANTS[tenant];
+      if (!cfg) return withCors(req, json({ error: "Invalid tenant" }, 400));
+
+      if (!env.ELEVENLABS_API_KEY) {
+        return withCors(req, json({ error: "Missing ELEVENLABS_API_KEY" }, 500));
+      }
+
+      // ElevenLabs: signed URL for the agent
+      const r = await fetch(
+        `https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(cfg.agentId)}`,
+        {
+          method: "GET",
+          headers: {
+            "xi-api-key": env.ELEVENLABS_API_KEY,
+          },
+        }
+      );
+
+      if (!r.ok) {
+        const txt = await r.text().catch(() => "");
+        return withCors(
+          req,
+          json(
+            {
+              error: "Failed to get signed url from ElevenLabs",
+              status: r.status,
+              detail: txt.slice(0, 300),
+            },
+            502
+          )
+        );
+      }
+
+      const data = (await r.json()) as { signed_url?: string };
+      const signedUrl = data?.signed_url;
+      if (!signedUrl) {
+        return withCors(req, json({ error: "ElevenLabs response missing signed_url" }, 502));
+      }
+
+      return withCors(req, json({ signedUrl }));
+    }
+
     // Tenant config
     // Accept both the base path ("/widget" or "/api/widget") and subpaths ("/widget/..." or "/api/widget/...")
     const isWidgetRoute =
@@ -98,7 +165,7 @@ export default {
       pathname.startsWith("/widget/") ||
       pathname.startsWith("/api/widget/");
 
-    if (isWidgetRoute) {
+    if (isWidgetRoute && !isSessionRoute) {
       const tenant = getTenant(url);
       if (!tenant) return withCors(req, json({ error: "Missing tenant" }, 400));
 
@@ -120,12 +187,16 @@ export default {
             "/api/widget/config/<tenant>",
             "/api/widget/tenant?tenant=<tenant>",
             "/api/widget/config?tenant=<tenant>",
+            "/api/widget/session?tenant=<tenant>",
+            "/widget/session?tenant=<tenant>",
             "/widget/tenant/<tenant>",
             "/widget/config/<tenant>",
             "/widget/tenant?tenant=<tenant>",
             "/widget/config?tenant=<tenant>",
             "/widget?tenant=<tenant>",
             "/api/widget?tenant=<tenant>",
+            "/widget/session",
+            "/api/widget/session",
             "/widget",
             "/api/widget",
           ],
