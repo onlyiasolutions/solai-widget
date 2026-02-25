@@ -402,22 +402,48 @@ export class SolAIWidget {
 
     const tenant = String(this.config.tenant ?? "").trim();
     const base = this.config.apiBase.replace(/\/$/, "");
-    const url = `${base}/api/widget/session?tenant=${encodeURIComponent(tenant)}`;
-    this.log("fetchSession: requesting signedUrl", { url, tenant });
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        "x-tenant": tenant,
-        "x-solai-tenant": tenant,
-      },
-    });
+
+    // Primary endpoint (expected): returns { tenant, agentId, signedUrl, branding }
+    const primaryUrl = `${base}/api/widget/session?tenant=${encodeURIComponent(tenant)}`;
+
+    // Fallback endpoint (some deployments expose only tenant/config). If this endpoint does NOT include
+    // `signedUrl`, we will surface a clear error so you can fix the Worker routes.
+    const fallbackUrl = `${base}/api/widget/tenant?tenant=${encodeURIComponent(tenant)}`;
+
+    this.log("fetchSession: requesting signedUrl", { primaryUrl, fallbackUrl, tenant });
+
+    const tryFetch = async (u: string) =>
+      fetch(u, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          "x-tenant": tenant,
+          "x-solai-tenant": tenant,
+        },
+      });
+
+    let res = await tryFetch(primaryUrl);
+
+    // If the primary endpoint is missing (404), try the fallback once.
+    if (res.status === 404) {
+      this.log("fetchSession: primary endpoint 404, trying fallback", { primaryUrl, fallbackUrl });
+      res = await tryFetch(fallbackUrl);
+    }
     if (!res.ok) {
       let bodyText = "";
       try {
         bodyText = await res.text();
       } catch {
         bodyText = "";
+      }
+      // Make 404s actionable: most common cause is that the Worker doesn't expose /api/widget/session.
+      if (res.status === 404) {
+        const endpointHint =
+          "No existe el endpoint esperado para crear sesión. " +
+          "El widget intenta /api/widget/session?tenant=... (o fallback /api/widget/tenant?tenant=...). " +
+          "Revisa el Worker (routes) y que `apiBase` apunte al dominio correcto.";
+        const extra = bodyText ? ` Detalle: ${bodyText}` : "";
+        throw new Error(`${endpointHint}${extra}`);
       }
       if (res.status === 402 || res.status === 429 || this.isQuotaError(bodyText)) {
         this.setQuotaBlocked(`fetchSession_http_${res.status}`);
@@ -441,18 +467,31 @@ export class SolAIWidget {
 
       throw new Error(errMsg ?? `Session error: ${res.status}`);
     }
-    const data = (await res.json()) as SessionData;
+    const data = (await res.json()) as Partial<SessionData>;
+
+    // Validate contract: we need a signedUrl to start ElevenLabs Conversation sessions.
+    if (!data || typeof data.signedUrl !== "string" || !data.signedUrl) {
+      // If we hit the fallback endpoint, it may only return tenant config without signedUrl.
+      throw new Error(
+        "Respuesta del servidor sin signedUrl. " +
+          "Asegúrate de que el Worker expone /api/widget/session y devuelve { signedUrl }. " +
+          "Ahora mismo parece que estás devolviendo solo config/tenant."
+      );
+    }
+
+    // Cast after validation
+    const sessionData = data as SessionData;
     this.totalSessionsCreated += 1;
     this.log("fetchSession: ok", {
-      tenant: data.tenant,
-      hasBranding: !!data.branding,
+      tenant: sessionData.tenant,
+      hasBranding: !!sessionData.branding,
       totalSessionsCreated: this.totalSessionsCreated,
     });
     this.log("Session created", {
       tenant: this.config.tenant,
       total: this.totalSessionsCreated,
     });
-    return data;
+    return sessionData;
   }
 
   /**
@@ -564,7 +603,7 @@ export class SolAIWidget {
     } catch (e) {
       console.error("[SolAI] Connect chat error:", e);
       if (!this.isQuotaBlocked()) {
-        this.addMessage("agent", `Error: ${(e as Error).message}. ¿Está el servidor corriendo?`);
+        this.addMessage("agent", `Error: ${(e as Error).message}`);
         this.setState("error");
       } else {
         this.setState("idle");
