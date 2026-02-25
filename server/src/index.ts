@@ -58,9 +58,13 @@ function getTenant(url: URL): string | null {
   // Supports:
   // - /api/widget/tenant/<tenant>
   // - /api/widget/config/<tenant>
+  // - /widget/tenant/<tenant>
+  // - /widget/config/<tenant>
   // - /api/widget/tenant?tenant=<tenant>
   // - /api/widget/config?tenant=<tenant>
-  const m = url.pathname.match(/^\/api\/widget\/(tenant|config)\/(.+)$/);
+  // - /widget/tenant?tenant=<tenant>
+  // - /widget/config?tenant=<tenant>
+  const m = url.pathname.match(/^\/(?:api\/)?widget\/(tenant|config)\/(.+)$/);
   if (m?.[2]) return decodeURIComponent(m[2]).trim();
 
   const q = url.searchParams.get("tenant");
@@ -78,13 +82,23 @@ export default {
 
     const url = new URL(req.url);
 
+    // Normalize trailing slash (except for root)
+    const pathname = url.pathname !== "/" ? url.pathname.replace(/\/+$/, "") : "/";
+
     // Health
-    if (url.pathname === "/health") {
+    if (pathname === "/health") {
       return withCors(req, json({ status: "ok", hasElevenKey: !!env.ELEVENLABS_API_KEY }));
     }
 
     // Tenant config
-    if (url.pathname.startsWith("/api/widget/tenant") || url.pathname.startsWith("/api/widget/config")) {
+    // Accept both the base path ("/widget" or "/api/widget") and subpaths ("/widget/..." or "/api/widget/...")
+    const isWidgetRoute =
+      pathname === "/widget" ||
+      pathname === "/api/widget" ||
+      pathname.startsWith("/widget/") ||
+      pathname.startsWith("/api/widget/");
+
+    if (isWidgetRoute) {
       const tenant = getTenant(url);
       if (!tenant) return withCors(req, json({ error: "Missing tenant" }, 400));
 
@@ -95,7 +109,7 @@ export default {
     }
 
     // Root (debug-friendly)
-    if (url.pathname === "/") {
+    if (pathname === "/") {
       return withCors(
         req,
         json({
@@ -106,6 +120,14 @@ export default {
             "/api/widget/config/<tenant>",
             "/api/widget/tenant?tenant=<tenant>",
             "/api/widget/config?tenant=<tenant>",
+            "/widget/tenant/<tenant>",
+            "/widget/config/<tenant>",
+            "/widget/tenant?tenant=<tenant>",
+            "/widget/config?tenant=<tenant>",
+            "/widget?tenant=<tenant>",
+            "/api/widget?tenant=<tenant>",
+            "/widget",
+            "/api/widget",
           ],
           tenants: Object.keys(TENANTS),
         })

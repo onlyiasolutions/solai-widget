@@ -1,10 +1,4 @@
 name = "solai-widget-api"
 main = "src/index.ts"
-
-# Force ES Module Worker (avoids Service Worker bundling / iife output)
-format = "modules"
-
 compatibility_date = "2025-02-25"
-
-# Enable Node.js built-in module polyfills only if your code (or deps) use node:* imports.
 compatibility_flags = ["nodejs_compat"]
