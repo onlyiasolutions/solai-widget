@@ -29,7 +29,7 @@ function json(data: unknown, status = 200, extraHeaders: HeadersInit = {}) {
 
 const CORS_ALLOW_METHODS = "GET,POST,OPTIONS";
 const CORS_ALLOW_HEADERS =
-  "Content-Type, Authorization, X-Solai-Tenant, X-Tenant, X-Idempotency-Key";
+  "Content-Type, Authorization, X-Solai-Tenant, X-Tenant, X-Idempotency-Key, X-Session-Id, X-Tenant-Id, X-Turn-Id, X-Trace-Id";
 const CORS_MAX_AGE = "86400";
 const DEV_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173"]);
 
@@ -69,6 +69,23 @@ function isOriginAllowedForTenant(origin: string, cfg: TenantConfig | undefined,
   return false;
 }
 
+function isOriginAllowedForWidgetRequest(origin: string, tenant: string | null, env: Env) {
+  if ((env.ENVIRONMENT ?? "").toLowerCase() === "dev" && DEV_ORIGINS.has(origin)) return true;
+
+  if (tenant) {
+    return isOriginAllowedForTenant(origin, TENANTS[tenant], env);
+  }
+
+  const envOrigins = env.WIDGET_ALLOWED_ORIGINS?.split(",").map((x) => x.trim()).filter(Boolean) ?? [];
+  if (envOrigins.includes(origin)) return true;
+
+  for (const cfg of Object.values(TENANTS)) {
+    if ((cfg.allowed_origins ?? []).map((x) => x.trim()).includes(origin)) return true;
+  }
+
+  return false;
+}
+
 function corsBaseHeaders(): HeadersInit {
   return {
     Vary: "Origin",
@@ -88,8 +105,7 @@ function withCorsEnv(req: Request, env: Env, res: Response) {
 
   if (origin && isWidgetPath(pathname)) {
     const tenant = getTenantForCors(req, url);
-    const cfg = tenant ? TENANTS[tenant] : undefined;
-    if (isOriginAllowedForTenant(origin, cfg, env)) {
+    if (isOriginAllowedForWidgetRequest(origin, tenant, env)) {
       h.set("Access-Control-Allow-Origin", origin);
       h.set("Access-Control-Allow-Credentials", "true");
     }
@@ -138,8 +154,7 @@ export default {
 
     if (widgetRoute && origin) {
       const tenantForCors = getTenantForCors(req, url);
-      const cfgForCors = tenantForCors ? TENANTS[tenantForCors] : undefined;
-      const allowed = !!tenantForCors && isOriginAllowedForTenant(origin, cfgForCors, env);
+      const allowed = isOriginAllowedForWidgetRequest(origin, tenantForCors, env);
 
       if (req.method === "OPTIONS") {
         if (!allowed) {

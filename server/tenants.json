@@ -3,28 +3,36 @@
     "agentId": "agent_4901khbsjs8tfmfsybvkfhhp0t68",
     "branding": { "name": "Gestoría Demo", "primaryColor": "#2563eb", "logoUrl": "" },
     "allowed_origins": [
-      "https://gestordemo.wesolai.com"
+      "https://gestordemo.wesolai.com",
+      "http://localhost:5173",
+      "http://localhost:3000"
     ]
   },
   "demo-dental": {
     "agentId": "agent_9801khbsbydnfywb6h8nhk9me27h",
     "branding": { "name": "Dental Demo", "primaryColor": "#059669", "logoUrl": "" },
     "allowed_origins": [
-      "https://dentalia.wesolai.com"
+      "https://dentalia.wesolai.com",
+      "http://localhost:5173",
+      "http://localhost:3000"
     ]
   },
   "demo-taller": {
     "agentId": "agent_9901khbrnec4e97ryd3x2p3qp9rh",
     "branding": { "name": "Taller Demo", "primaryColor": "#dc2626", "logoUrl": "" },
     "allowed_origins": [
-      "https://autodemo.wesolai.com"
+      "https://autodemo.wesolai.com",
+      "http://localhost:5173",
+      "http://localhost:3000"
     ]
   },
   "demo-salon": {
     "agentId": "agent_2401khbsrhaxe6fa8e75ca4vhxsx",
     "branding": { "name": "Salón Demo", "primaryColor": "#7c3aed", "logoUrl": "" },
     "allowed_origins": [
-      "https://studio.wesolai.com"
+      "https://studio.wesolai.com",
+      "http://localhost:5173",
+      "http://localhost:3000"
     ]
   },
   "nexo-home": {

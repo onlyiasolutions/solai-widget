@@ -61,6 +61,7 @@ export class SolAIWidget {
   private root: ShadowRoot | null = null;
   private container: HTMLElement | null = null;
   private button: HTMLElement | null = null;
+  private shellEl: HTMLElement | null = null;
   private panel: HTMLElement | null = null;
   private chatContainer: HTMLElement | null = null;
   private inputEl: HTMLInputElement | null = null;
@@ -436,8 +437,12 @@ export class SolAIWidget {
     this.button.addEventListener("click", () => this.togglePanel());
     wrap.appendChild(this.button);
 
+    this.shellEl = document.createElement("div");
+    this.shellEl.className = "solai-chat-shell";
+    wrap.appendChild(this.shellEl);
+
     this.panel = document.createElement("div");
-    this.panel.className = "solai-panel";
+    this.panel.className = "solai-panel solai-chat-panel";
     this.panel.hidden = true;
     const showInput = this.config.mode !== "voice";
     const showCall = this.config.mode !== "chat";
@@ -473,7 +478,7 @@ export class SolAIWidget {
           : ""
       }
     `;
-    wrap.appendChild(this.panel);
+    this.shellEl.appendChild(this.panel);
 
     this.chatContainer = this.panel.querySelector(".solai-chat");
     this.titleEl = this.panel.querySelector(".solai-panel-title");
@@ -543,6 +548,7 @@ export class SolAIWidget {
   private openPanel() {
     this.panel!.hidden = false;
     this.panel!.classList.remove("solai-panel-closing");
+    this.shellEl?.classList.add("is-open");
     this.button?.classList.add("open");
     this.button?.setAttribute("aria-label", "Cerrar chat");
     requestAnimationFrame(() => {
@@ -569,6 +575,7 @@ export class SolAIWidget {
     setTimeout(() => {
       this.panel!.hidden = true;
       this.panel?.classList.remove("solai-panel-closing");
+      this.shellEl?.classList.remove("is-open");
     }, 220);
   }
 
@@ -580,6 +587,7 @@ export class SolAIWidget {
     setTimeout(() => {
       this.panel!.hidden = true;
       this.panel?.classList.remove("solai-panel-closing");
+      this.shellEl?.classList.remove("is-open");
       this.endCurrentSession("hard_close");
       this.clearChatMessages();
       this.sessionExpired = false;
@@ -679,20 +687,25 @@ export class SolAIWidget {
       `${joinUrl(rootBase, "/widget/tenant")}?tenant=${encodeURIComponent(tenant)}`,
       `${joinUrl(apiBase, "/widget/tenant")}?tenant=${encodeURIComponent(tenant)}`,
     ];
-    const candidates = [...postSessionUrls, ...getSessionUrls, ...tenantUrls];
+    const candidates = [...getSessionUrls, ...tenantUrls, ...postSessionUrls];
 
     this.log("fetchSession: requesting signedUrl", { tenant, candidates });
 
     const tryFetch = async (u: string) => {
       const isPostSession = postSessionUrls.includes(u);
+      const headers: Record<string, string> = isPostSession
+        ? {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "x-tenant": tenant,
+            "x-solai-tenant": tenant,
+          }
+        : {
+            Accept: "application/json",
+          };
       return fetch(u, {
         method: isPostSession ? "POST" : "GET",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          "x-tenant": tenant,
-          "x-solai-tenant": tenant,
-        },
+        headers,
         body: isPostSession ? JSON.stringify({ tenant, client_session_id: this.sessionId }) : undefined,
       });
     };
@@ -702,7 +715,13 @@ export class SolAIWidget {
 
     for (const u of candidates) {
       this.log("fetchSession: trying", u);
-      const r = await tryFetch(u);
+      let r: Response;
+      try {
+        r = await tryFetch(u);
+      } catch (err) {
+        this.log("fetchSession: candidate failed", u, err);
+        continue;
+      }
       if (r.status !== 404) {
         res = r;
         usedUrl = u;

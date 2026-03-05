@@ -21,6 +21,11 @@ export function getStyles(primaryColor: string): string {
   --solai-muted: #9CA3AF;
   --solai-bubble-user: var(--solai-primary);
   --solai-bubble-agent: #F3F4F6;
+  --solai-accent: #3B82F6;
+
+  /* Widget glass tokens personalizables */
+  --widget-accent: var(--solai-accent);
+  --widget-halo-strength: 0.34;
 
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   font-size: 14px;
@@ -85,25 +90,80 @@ export function getStyles(primaryColor: string): string {
 .solai-btn-toggle:active { transform: scale(0.96); }
 .solai-btn-toggle.open { transform: scale(0.96); }
 
-/* Panel */
-.solai-panel {
+/* Shell: capa exclusiva para halo blur */
+.solai-chat-shell{
   position: absolute;
   z-index: 1;
   width: 384px;
   max-width: calc(100vw - 40px);
   height: 520px;
   max-height: calc(100vh - 100px);
-  background: var(--solai-bg);
-  border-radius: 24px;
-  box-shadow: 0 20px 40px rgba(0,0,0,0.08);
-  border: 1px solid var(--solai-border);
+  border-radius: 28px;
+  isolation: isolate;
+  overflow: visible;
+  background: transparent !important;
+}
+
+.solai-chat-shell::before{
+  content: none !important;
+  display: none !important;
+}
+
+.solai-chat-shell::after{
+  content:"";
+  position:absolute;
+  left: 2%;
+  width: 96%;
+  bottom: -34px;
+  height: 84px;
+  border-radius: 999px;
+  pointer-events:none;
+  z-index:-2;
+  opacity: 0;
+  background: radial-gradient(60% 100% at 50% 30%, color-mix(in srgb, var(--widget-accent) 20%, transparent), rgba(59,130,246,0) 75%);
+  filter: blur(22px);
+  transition: opacity 220ms cubic-bezier(.16,1,.3,1);
+}
+
+.solai-chat-shell.is-open::before,
+.solai-chat-shell.is-open::after {
+  opacity: 1;
+}
+
+/* Panel */
+.solai-panel,
+.solai-chat-panel {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  isolation: isolate;
+  background: rgba(255, 255, 255, 0.96);
+  border-radius: 28px;
+  box-shadow:
+    0 24px 80px rgba(15, 23, 42, 0.20),
+    0 2px 10px rgba(15, 23, 42, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.55);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
   opacity: 0;
   transform: translateY(20px) scale(0.95);
   pointer-events: none;
   transition: opacity 220ms cubic-bezier(.16,1,.3,1), transform 220ms cubic-bezier(.16,1,.3,1);
+}
+
+/* Kill switch: el panel no debe dibujar ninguna placa extra detrás */
+.solai-chat-panel::before,
+.solai-chat-panel::after{
+  content: none !important;
+  display: none !important;
+}
+.solai-chat-panel{
+  background: rgba(255,255,255,0.96) !important;
 }
 .solai-panel.solai-panel-open {
   opacity: 1;
@@ -116,12 +176,15 @@ export function getStyles(primaryColor: string): string {
   pointer-events: none;
 }
 
-.solai-widget-wrap.pos-br .solai-panel,
-.solai-widget-wrap.pos-tr .solai-panel { right: 0; bottom: 72px; }
-.solai-widget-wrap.pos-bl .solai-panel,
-.solai-widget-wrap.pos-tl .solai-panel { left: 0; bottom: 72px; }
-.solai-widget-wrap.pos-tr .solai-panel,
-.solai-widget-wrap.pos-tl .solai-panel { bottom: auto; top: 72px; }
+.solai-widget-wrap.pos-br .solai-chat-shell,
+.solai-widget-wrap.pos-tr .solai-chat-shell { right: 0; bottom: 72px; }
+.solai-widget-wrap.pos-bl .solai-chat-shell,
+.solai-widget-wrap.pos-tl .solai-chat-shell { left: 0; bottom: 72px; }
+.solai-widget-wrap.pos-tr .solai-chat-shell,
+.solai-widget-wrap.pos-tl .solai-chat-shell { bottom: auto; top: 72px; }
+
+/* Asegura que el launcher siempre quede por encima */
+.solai-btn-toggle { z-index: 2; }
 
 /* Header */
 .solai-panel-header {
@@ -167,6 +230,19 @@ export function getStyles(primaryColor: string): string {
 }
 .solai-panel.view-call .solai-chat-view {
   display: none;
+}
+
+/* Interior del chat nítido (sin tinte/blur) */
+.solai-chat-panel > * {
+  position: relative;
+  z-index: 1;
+}
+.solai-chat-panel .solai-chat-view,
+.solai-chat-panel .solai-chat-wrap,
+.solai-chat-panel .solai-chat,
+.solai-chat-panel .solai-panel-header,
+.solai-chat-panel .solai-input-row {
+  background: transparent;
 }
 
 /* Call screen (solo visible en modo llamada) */
@@ -327,6 +403,15 @@ export function getStyles(primaryColor: string): string {
 .solai-input-row-voice .solai-btn-call {
   width: 52px; height: 52px;
   min-width: 52px; min-height: 52px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .solai-chat-shell::before,
+  .solai-chat-shell::after,
+  .solai-panel,
+  .solai-btn-toggle {
+    transition: none;
+  }
 }
 
 </style>
