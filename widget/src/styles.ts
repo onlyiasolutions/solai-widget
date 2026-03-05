@@ -152,6 +152,7 @@ export function getStyles(primaryColor: string): string {
   color: var(--solai-muted); font-size: 20px;
   cursor: pointer; border-radius: 8px;
   display: flex; align-items: center; justify-content: center;
+  margin-right: -10px;
   transition: color 180ms ease, background 180ms ease;
 }
 .solai-btn-close:hover { color: var(--solai-text); background: #F3F4F6; }
