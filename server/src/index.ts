@@ -1,12 +1,15 @@
 import tenants from "../tenants.json";
+import { enforceToolGuardrails } from "./tool-gateway";
+import { logTrace, traceIdFromReq } from "./telemetry";
 
 type Branding = { name: string; primaryColor: string; logoUrl?: string };
 type TenantConfig = { agentId: string; branding: Branding };
 type TenantsMap = Record<string, TenantConfig>;
 
 export interface Env {
-  // Optional, but allows /health to report if it's configured.
   ELEVENLABS_API_KEY?: string;
+  N8N_TOOL_BASE_URL?: string;
+  TENANT_KILL_SWITCH?: string;
 }
 
 const TENANTS: TenantsMap = tenants as unknown as TenantsMap;
@@ -25,23 +28,18 @@ function corsHeaders(req: Request): HeadersInit {
   const originHeader = req.headers.get("Origin");
   const allowOrigin = originHeader || "*";
 
-  const reqHeaders =
-    req.headers.get("Access-Control-Request-Headers") ||
-    "Content-Type, Authorization";
-  const reqMethod =
-    req.headers.get("Access-Control-Request-Method") || "GET,POST,OPTIONS";
+  const reqHeaders = req.headers.get("Access-Control-Request-Headers") || "Content-Type, Authorization";
+  const reqMethod = req.headers.get("Access-Control-Request-Method") || "GET,POST,OPTIONS";
 
   const headers: HeadersInit = {
     "Access-Control-Allow-Origin": allowOrigin,
-    "Vary": "Origin",
+    Vary: "Origin",
     "Access-Control-Allow-Headers": reqHeaders,
     "Access-Control-Allow-Methods": reqMethod,
   };
 
-  // Only allow credentials when we echo back a specific Origin.
   if (originHeader) {
-    (headers as Record<string, string>)["Access-Control-Allow-Credentials"] =
-      "true";
+    (headers as Record<string, string>)["Access-Control-Allow-Credentials"] = "true";
   }
 
   return headers;
@@ -55,15 +53,6 @@ function withCors(req: Request, res: Response) {
 }
 
 function getTenant(url: URL): string | null {
-  // Supports:
-  // - /api/widget/tenant/<tenant>
-  // - /api/widget/config/<tenant>
-  // - /widget/tenant/<tenant>
-  // - /widget/config/<tenant>
-  // - /api/widget/tenant?tenant=<tenant>
-  // - /api/widget/config?tenant=<tenant>
-  // - /widget/tenant?tenant=<tenant>
-  // - /widget/config?tenant=<tenant>
   const m = url.pathname.match(/^\/(?:api\/)?widget\/(tenant|config)\/(.+)$/);
   if (m?.[2]) return decodeURIComponent(m[2]).trim();
 
@@ -77,7 +66,6 @@ async function getTenantFromReq(req: Request, url: URL): Promise<string | null> 
   const q = url.searchParams.get("tenant");
   if (q) return q.trim();
 
-  // If not provided via querystring, try JSON body (POST/PUT/etc.)
   if (req.method !== "GET") {
     try {
       const body: any = await req.json();
@@ -90,25 +78,93 @@ async function getTenantFromReq(req: Request, url: URL): Promise<string | null> 
   return null;
 }
 
+function getClientIp(req: Request) {
+  return req.headers.get("cf-connecting-ip") ?? req.headers.get("x-forwarded-for") ?? "unknown";
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
-    // Preflight
+    (globalThis as any).SOLAI_TENANT_KILL_SWITCH = env.TENANT_KILL_SWITCH || "";
+
     if (req.method === "OPTIONS") {
       return withCors(req, new Response(null, { status: 204 }));
     }
 
     const url = new URL(req.url);
-
-    // Normalize trailing slash (except for root)
     const pathname = url.pathname !== "/" ? url.pathname.replace(/\/+$/, "") : "/";
 
-    // Health
     if (pathname === "/health") {
       return withCors(req, json({ status: "ok", hasElevenKey: !!env.ELEVENLABS_API_KEY }));
     }
 
-    // Session (returns { signedUrl })
-    // Use a regex match to avoid any edge cases with trailing slashes or future prefixes.
+    const toolRouteMatch = pathname.match(/^\/(?:api\/)?tool\/([a-zA-Z0-9_-]+)$/);
+    if (toolRouteMatch && req.method === "POST") {
+      const traceId = traceIdFromReq(req);
+      const toolName = decodeURIComponent(toolRouteMatch[1]);
+      const sessionId = req.headers.get("x-session-id")?.trim() ?? "";
+      const tenantId = req.headers.get("x-tenant-id")?.trim() ?? "";
+      const idempotencyKey = req.headers.get("x-idempotency-key")?.trim() ?? "";
+      const turnIdHeader = req.headers.get("x-turn-id")?.trim() ?? "";
+      const ip = getClientIp(req);
+
+      const body = (await req.json().catch(() => ({}))) as {
+        payload?: Record<string, unknown>;
+        turn_id?: string;
+      };
+      const turnId = (body.turn_id ?? turnIdHeader ?? "").trim();
+
+      if (!idempotencyKey || !sessionId || !tenantId || !turnId) {
+        return withCors(req, json({ error: "missing_headers", message: "Required: x-session-id, x-tenant-id, x-idempotency-key, x-turn-id", trace_id: traceId }, 400));
+      }
+
+      const guard = enforceToolGuardrails({
+        traceId,
+        sessionId,
+        tenantId,
+        ip,
+        idempotencyKey,
+        turnId,
+        toolName,
+      });
+
+      if (!guard.ok) {
+        logTrace("tool.blocked", traceId, { tenant_id: tenantId, session_id: sessionId, code: guard.code });
+        return withCors(req, json({ error: guard.code, message: guard.message, retry_after_s: guard.retry_after_s, trace_id: traceId }, guard.status));
+      }
+
+      if (!env.N8N_TOOL_BASE_URL) {
+        return withCors(req, json({ error: "tool_proxy_not_configured", trace_id: traceId }, 503));
+      }
+
+      const upstream = `${env.N8N_TOOL_BASE_URL.replace(/\/+$/, "")}/${encodeURIComponent(toolName)}`;
+      const upstreamRes = await fetch(upstream, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-trace-id": traceId,
+          "x-idempotency-key": idempotencyKey,
+          "x-session-id": sessionId,
+          "x-tenant-id": tenantId,
+          "x-turn-id": turnId,
+        },
+        body: JSON.stringify({ payload: body.payload ?? {}, turn_id: turnId }),
+      });
+
+      const payload = await upstreamRes.text();
+      logTrace("tool.forward", traceId, { tenant_id: tenantId, session_id: sessionId, tool: toolName, status: upstreamRes.status });
+
+      return withCors(
+        req,
+        new Response(payload, {
+          status: upstreamRes.status,
+          headers: {
+            "Content-Type": upstreamRes.headers.get("Content-Type") ?? "application/json",
+            "x-trace-id": traceId,
+          },
+        })
+      );
+    }
+
     const isSessionRoute = /^\/(?:api\/)?widget\/session$/.test(pathname);
 
     if (isSessionRoute) {
@@ -122,7 +178,6 @@ export default {
         return withCors(req, json({ error: "Missing ELEVENLABS_API_KEY" }, 500));
       }
 
-      // ElevenLabs: signed URL for the agent
       const r = await fetch(
         `https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(cfg.agentId)}`,
         {
@@ -156,13 +211,9 @@ export default {
 
       const tz = "Europe/Madrid";
       const now = new Date();
-
-      // Build an ISO string that reflects the provided IANA timezone (e.g. Europe/Madrid),
-      // including the correct UTC offset (e.g. 2026-02-25T18:29:11+01:00).
       const pad2 = (n: number) => String(n).padStart(2, "0");
 
       const gmtOffsetToIso = (gmt: string) => {
-        // Examples seen in the wild: "GMT+1", "GMT+01:00", "UTC+1", "UTC+01:00"
         const m = gmt.match(/^(?:GMT|UTC)([+-])(\d{1,2})(?::?(\d{2}))?$/i);
         if (!m) return "Z";
         const sign = m[1];
@@ -172,7 +223,6 @@ export default {
       };
 
       const now_iso = (() => {
-        // We format parts in the target timezone and then append the timezone offset.
         const dtf = new Intl.DateTimeFormat("en-GB", {
           timeZone: tz,
           year: "numeric",
@@ -195,7 +245,6 @@ export default {
         const minute = get("minute");
         const second = get("second");
 
-        // In most runtimes this comes as "GMT+1" / "UTC+1" / "GMT+01:00" etc.
         const tzName = get("timeZoneName").replace(/\s/g, "");
         const offset = gmtOffsetToIso(tzName);
 
@@ -218,13 +267,13 @@ export default {
             tz,
             now_iso,
             today_human,
+            first_message_mode: "greet_only",
+            tools_enabled: false,
           },
         })
       );
     }
 
-    // Tenant config
-    // Accept both the base path ("/widget" or "/api/widget") and subpaths ("/widget/..." or "/api/widget/...")
     const isWidgetRoute =
       pathname === "/widget" ||
       pathname === "/api/widget" ||
@@ -241,7 +290,6 @@ export default {
       return withCors(req, json({ tenant, ...cfg }));
     }
 
-    // Root (debug-friendly)
     if (pathname === "/") {
       return withCors(
         req,
@@ -249,6 +297,7 @@ export default {
           status: "ok",
           endpoints: [
             "/health",
+            "/api/tool/:tool",
             "/api/widget/tenant/<tenant>",
             "/api/widget/config/<tenant>",
             "/api/widget/tenant?tenant=<tenant>",

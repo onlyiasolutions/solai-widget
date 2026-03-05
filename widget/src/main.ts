@@ -6,7 +6,7 @@ import { SolAIWidget, type WidgetConfig } from "./widget";
 
 declare global {
   interface Window {
-    SOLA_WIDGET_CONFIG?: Partial<{ tenant: string; apiBase: string; position: string; mode: string; primaryColor: string; sessionTtlMinutes?: number }>;
+    SOLA_WIDGET_CONFIG?: Partial<{ tenant: string; apiBase: string; position: string; mode: string; primaryColor: string; sessionTtlMinutes?: number; firstMessageMode?: "greet_only" }>;
     __SOLAI_WIDGET_MOUNTED__?: boolean;
   }
 }
@@ -33,6 +33,9 @@ function getConfig(): WidgetConfig {
       const n = attr != null ? parseInt(attr, 10) : (global as { sessionTtlMinutes?: number })?.sessionTtlMinutes ?? 10;
       return isNaN(n) || n <= 0 ? 10 : n;
     })(),
+    firstMessageMode:
+      global?.firstMessageMode ??
+      ((script?.getAttribute("data-first-message-mode") as "greet_only" | null) ?? "greet_only"),
   };
 }
 

@@ -5,6 +5,9 @@
  */
 import { Conversation } from "@elevenlabs/client";
 import { getStyles } from "./styles";
+import { FIRST_MESSAGE_MODE } from "./config.limits";
+import { createTraceId, telemetryLog } from "./telemetry";
+import { ToolExecutionGateway } from "./tool-gateway";
 
 const DEV =
   typeof location !== "undefined" &&
@@ -19,6 +22,7 @@ export type WidgetConfig = {
   mode: "chat" | "voice" | "voice+chat";
   primaryColor: string;
   sessionTtlMinutes?: number;
+  firstMessageMode?: "greet_only";
 };
 
 export type DynamicVars = {
@@ -84,6 +88,13 @@ export class SolAIWidget {
   private suppressedGreetingOnce = false;
   private sessionCreateTimestamps: number[] = [];
   private totalSessionsCreated = 0;
+  private readonly sessionId = createTraceId();
+  private toolGateway: ToolExecutionGateway | null = null;
+  private hasShownInitialGreeting = false;
+  private autoReconnectAttempts = 0;
+  private autoReconnectWindowStart = 0;
+  private readonly AUTO_RECONNECT_LIMIT = 2;
+  private readonly AUTO_RECONNECT_WINDOW_MS = 60_000;
 
   constructor(config: WidgetConfig) {
     this.config = {
@@ -96,6 +107,7 @@ export class SolAIWidget {
         : "voice+chat") as WidgetConfig["mode"],
     };
     this.inactivityTtlMs = (config.sessionTtlMinutes ?? 15) * 60 * 1000;
+    this.config.firstMessageMode = config.firstMessageMode ?? FIRST_MESSAGE_MODE;
 
     try {
       if (
@@ -342,6 +354,32 @@ export class SolAIWidget {
 
     this.setUIForMode();
     this.startInactivityCheck();
+    this.showInitialGreetingIfNeeded();
+  }
+
+  private showInitialGreetingIfNeeded() {
+    if (this.hasShownInitialGreeting) return;
+    if (this.config.firstMessageMode !== "greet_only") return;
+    this.hasShownInitialGreeting = true;
+    this.addMessage("agent", "Hola, soy Auri. ¿En qué te puedo ayudar hoy?");
+  }
+
+  private canAutoReconnect() {
+    const now = Date.now();
+    if (!this.autoReconnectWindowStart || now - this.autoReconnectWindowStart > this.AUTO_RECONNECT_WINDOW_MS) {
+      this.autoReconnectWindowStart = now;
+      this.autoReconnectAttempts = 0;
+    }
+    if (this.autoReconnectAttempts >= this.AUTO_RECONNECT_LIMIT) {
+      return false;
+    }
+    this.autoReconnectAttempts += 1;
+    return true;
+  }
+
+  private resetAutoReconnectWindow() {
+    this.autoReconnectAttempts = 0;
+    this.autoReconnectWindowStart = Date.now();
   }
 
   private setUIForMode() {
@@ -605,6 +643,12 @@ export class SolAIWidget {
     try {
       const session = await this.fetchSession();
       this.log("session fetched ok");
+      this.toolGateway = new ToolExecutionGateway({
+        apiBase: this.config.apiBase,
+        tenantId: this.config.tenant,
+        sessionId: this.sessionId,
+        debug: this.debug,
+      });
 
       this.updateHeaderBranding();
 
@@ -671,7 +715,11 @@ export class SolAIWidget {
           }
           if (str.includes("token") || str.includes("expir")) {
             this.disconnect();
-            this.ensureChatSession();
+            if (this.canAutoReconnect()) {
+              this.ensureChatSession();
+            } else {
+              this.addMessage("agent", "Sesión cerrada por seguridad. Escribe de nuevo para reconectar.");
+            }
           } else {
             this.clearResponseTimeout();
             this.setState("error");
@@ -688,6 +736,7 @@ export class SolAIWidget {
       this.conversation = conversation;
       this.callActive = false;
       this.updateLastActivity();
+      this.resetAutoReconnectWindow();
       this.sessionStartedAt = Date.now();
       this.suppressedGreetingOnce = false;
       this.setState("idle");
@@ -776,6 +825,12 @@ export class SolAIWidget {
     try {
       const session = await this.fetchSession();
       this.updateHeaderBranding();
+      this.toolGateway = new ToolExecutionGateway({
+        apiBase: this.config.apiBase,
+        tenantId: this.config.tenant,
+        sessionId: this.sessionId,
+        debug: this.debug,
+      });
 
       const convoOpts: any = {
         signedUrl: session.signedUrl,
@@ -822,7 +877,11 @@ export class SolAIWidget {
           }
           if (str.includes("token") || str.includes("expir")) {
             this.endCurrentSession("voice_token");
-            this.connectCall();
+            if (this.canAutoReconnect()) {
+              this.connectCall();
+            } else {
+              this.addMessage("agent", "Llamada cerrada por seguridad. Pulsa el botón para reconectar.");
+            }
           } else {
             this.setState("error");
           }
@@ -846,6 +905,7 @@ export class SolAIWidget {
       this.conversation = conversation;
       this.callActive = true;
       this.updateLastActivity();
+      this.resetAutoReconnectWindow();
       this.sessionStartedAt = Date.now();
       this.suppressedGreetingOnce = false;
       this.setState("in_call");
@@ -953,6 +1013,17 @@ export class SolAIWidget {
     }
 
     this.addMessage("user", text);
+    this.toolGateway?.startTurn();
+    telemetryLog(
+      {
+        trace_id: createTraceId(),
+        session_id: this.sessionId,
+        tenant_id: this.config.tenant,
+        event: "chat.user_message",
+        meta: { first_user_input: this.firstUserMessageSentAt != null },
+      },
+      this.debug
+    );
     this.setState("processing");
 
     const ok = await this.ensureChatSession();
