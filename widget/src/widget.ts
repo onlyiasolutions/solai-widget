@@ -295,9 +295,6 @@ export class SolAIWidget {
     const showCall = this.config.mode !== "chat";
     this.panel.innerHTML = `
       <header class="solai-panel-header">
-        <div class="solai-panel-brand">
-          <span class="solai-panel-title">Chat</span>
-        </div>
         <button class="solai-btn-close" aria-label="Cerrar">×</button>
       </header>
       <div class="solai-chat-view">
