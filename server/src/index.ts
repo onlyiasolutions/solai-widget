@@ -1,6 +1,7 @@
 import tenants from "../tenants.json";
 import { enforceToolGuardrails } from "./tool-gateway";
 import { logTrace, traceIdFromReq } from "./telemetry";
+import { SAFE_SYSTEM_PROMPT } from "./safety-system-prompt";
 
 type Branding = { name: string; primaryColor: string; logoUrl?: string };
 type TenantConfig = { agentId: string; branding: Branding };
@@ -10,6 +11,7 @@ export interface Env {
   ELEVENLABS_API_KEY?: string;
   N8N_TOOL_BASE_URL?: string;
   TENANT_KILL_SWITCH?: string;
+  WIDGET_ALLOWED_ORIGINS?: string;
 }
 
 const TENANTS: TenantsMap = tenants as unknown as TenantsMap;
@@ -24,9 +26,28 @@ function json(data: unknown, status = 200, extraHeaders: HeadersInit = {}) {
   });
 }
 
-function corsHeaders(req: Request): HeadersInit {
+const DEFAULT_ALLOWED_ORIGINS = new Set([
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "https://solai-widget-api.wesolailabs.workers.dev",
+]);
+
+function resolveAllowedOrigins(env?: Env): Set<string> {
+  const origins = new Set(DEFAULT_ALLOWED_ORIGINS);
+  const fromEnv = env?.WIDGET_ALLOWED_ORIGINS?.split(",").map((x) => x.trim()).filter(Boolean) ?? [];
+  for (const origin of fromEnv) origins.add(origin);
+  return origins;
+}
+
+function corsHeaders(req: Request, env?: Env): HeadersInit {
   const originHeader = req.headers.get("Origin");
-  const allowOrigin = originHeader || "*";
+  const allowOrigins = resolveAllowedOrigins(env);
+  const allowOrigin =
+    originHeader && allowOrigins.has(originHeader)
+      ? originHeader
+      : originHeader
+        ? Array.from(allowOrigins)[0]
+        : "*";
 
   const reqHeaders = req.headers.get("Access-Control-Request-Headers") || "Content-Type, Authorization";
   const reqMethod = req.headers.get("Access-Control-Request-Method") || "GET,POST,OPTIONS";
@@ -52,6 +73,13 @@ function withCors(req: Request, res: Response) {
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
 }
 
+function withCorsEnv(req: Request, env: Env, res: Response) {
+  const h = new Headers(res.headers);
+  const ch = corsHeaders(req, env);
+  for (const [k, v] of Object.entries(ch)) h.set(k, v as string);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+}
+
 function getTenant(url: URL): string | null {
   const m = url.pathname.match(/^\/(?:api\/)?widget\/(tenant|config)\/(.+)$/);
   if (m?.[2]) return decodeURIComponent(m[2]).trim();
@@ -68,7 +96,7 @@ async function getTenantFromReq(req: Request, url: URL): Promise<string | null> 
 
   if (req.method !== "GET") {
     try {
-      const body: any = await req.json();
+      const body: any = await req.clone().json();
       if (body?.tenant) return String(body.tenant).trim();
     } catch {
       // ignore
@@ -87,14 +115,14 @@ export default {
     (globalThis as any).SOLAI_TENANT_KILL_SWITCH = env.TENANT_KILL_SWITCH || "";
 
     if (req.method === "OPTIONS") {
-      return withCors(req, new Response(null, { status: 204 }));
+      return withCorsEnv(req, env, new Response(null, { status: 204 }));
     }
 
     const url = new URL(req.url);
     const pathname = url.pathname !== "/" ? url.pathname.replace(/\/+$/, "") : "/";
 
     if (pathname === "/health") {
-      return withCors(req, json({ status: "ok", hasElevenKey: !!env.ELEVENLABS_API_KEY }));
+      return withCorsEnv(req, env, json({ status: "ok", hasElevenKey: !!env.ELEVENLABS_API_KEY }));
     }
 
     const toolRouteMatch = pathname.match(/^\/(?:api\/)?tool\/([a-zA-Z0-9_-]+)$/);
@@ -114,7 +142,7 @@ export default {
       const turnId = (body.turn_id ?? turnIdHeader ?? "").trim();
 
       if (!idempotencyKey || !sessionId || !tenantId || !turnId) {
-        return withCors(req, json({ error: "missing_headers", message: "Required: x-session-id, x-tenant-id, x-idempotency-key, x-turn-id", trace_id: traceId }, 400));
+        return withCorsEnv(req, env, json({ error: "missing_headers", message: "Required: x-session-id, x-tenant-id, x-idempotency-key, x-turn-id", trace_id: traceId }, 400));
       }
 
       const guard = enforceToolGuardrails({
@@ -129,11 +157,11 @@ export default {
 
       if (!guard.ok) {
         logTrace("tool.blocked", traceId, { tenant_id: tenantId, session_id: sessionId, code: guard.code });
-        return withCors(req, json({ error: guard.code, message: guard.message, retry_after_s: guard.retry_after_s, trace_id: traceId }, guard.status));
+        return withCorsEnv(req, env, json({ error: guard.code, message: guard.message, retry_after_s: guard.retry_after_s, trace_id: traceId }, guard.status));
       }
 
       if (!env.N8N_TOOL_BASE_URL) {
-        return withCors(req, json({ error: "tool_proxy_not_configured", trace_id: traceId }, 503));
+        return withCorsEnv(req, env, json({ error: "tool_proxy_not_configured", trace_id: traceId }, 503));
       }
 
       const upstream = `${env.N8N_TOOL_BASE_URL.replace(/\/+$/, "")}/${encodeURIComponent(toolName)}`;
@@ -153,8 +181,9 @@ export default {
       const payload = await upstreamRes.text();
       logTrace("tool.forward", traceId, { tenant_id: tenantId, session_id: sessionId, tool: toolName, status: upstreamRes.status });
 
-      return withCors(
+      return withCorsEnv(
         req,
+        env,
         new Response(payload, {
           status: upstreamRes.status,
           headers: {
@@ -166,16 +195,18 @@ export default {
     }
 
     const isSessionRoute = /^\/(?:api\/)?widget\/session$/.test(pathname);
+    const isMessageRoute = /^\/(?:api\/)?widget\/message$/.test(pathname);
+    const isResetRoute = /^\/(?:api\/)?widget\/reset$/.test(pathname);
 
-    if (isSessionRoute) {
+    if (isSessionRoute && (req.method === "GET" || req.method === "POST")) {
       const tenant = await getTenantFromReq(req, url);
-      if (!tenant) return withCors(req, json({ error: "Missing tenant" }, 400));
+      if (!tenant) return withCorsEnv(req, env, json({ error: "Missing tenant" }, 400));
 
       const cfg = TENANTS[tenant];
-      if (!cfg) return withCors(req, json({ error: "Invalid tenant" }, 400));
+      if (!cfg) return withCorsEnv(req, env, json({ error: "Invalid tenant" }, 404));
 
       if (!env.ELEVENLABS_API_KEY) {
-        return withCors(req, json({ error: "Missing ELEVENLABS_API_KEY" }, 500));
+        return withCorsEnv(req, env, json({ error: "Missing ELEVENLABS_API_KEY" }, 500));
       }
 
       const r = await fetch(
@@ -190,8 +221,9 @@ export default {
 
       if (!r.ok) {
         const txt = await r.text().catch(() => "");
-        return withCors(
+        return withCorsEnv(
           req,
+          env,
           json(
             {
               error: "Failed to get signed url from ElevenLabs",
@@ -206,7 +238,7 @@ export default {
       const data = (await r.json()) as { signed_url?: string };
       const signedUrl = data?.signed_url;
       if (!signedUrl) {
-        return withCors(req, json({ error: "ElevenLabs response missing signed_url" }, 502));
+        return withCorsEnv(req, env, json({ error: "ElevenLabs response missing signed_url" }, 502));
       }
 
       const tz = "Europe/Madrid";
@@ -259,19 +291,62 @@ export default {
         timeZone: tz,
       }).format(now);
 
-      return withCors(
+      const reqBody = req.method === "POST" ? ((await req.clone().json().catch(() => ({}))) as { client_session_id?: string }) : {};
+      const sessionId = reqBody.client_session_id?.trim() || crypto.randomUUID();
+      const ttlSeconds = 15 * 60;
+
+      return withCorsEnv(
         req,
+        env,
         json({
+          tenant,
+          session_id: sessionId,
+          ttl_seconds: ttlSeconds,
+          agentId: cfg.agentId,
           signedUrl,
+          branding: cfg.branding,
           dynamic_variables: {
             tz,
             now_iso,
             today_human,
-            first_message_mode: "greet_only",
+            first_message_mode: "platform_managed",
+            allow_agent_first_message: true,
+            safe_system_prompt: SAFE_SYSTEM_PROMPT,
+            safe_system_prompt_version: "2026-03-05",
             tools_enabled: false,
           },
         })
       );
+    }
+
+    if (isMessageRoute && req.method === "POST") {
+      const body = (await req.json().catch(() => ({}))) as {
+        session_id?: string;
+        text?: string;
+        idempotency_key?: string;
+      };
+      if (!body.session_id || !body.text || !body.idempotency_key) {
+        return withCorsEnv(req, env, json({ error: "Missing session_id, text or idempotency_key" }, 400));
+      }
+      return withCorsEnv(
+        req,
+        env,
+        json(
+          {
+            error: "not_supported_in_widget_mode",
+            message: "Message transport is handled over ElevenLabs websocket in this widget.",
+          },
+          501
+        )
+      );
+    }
+
+    if (isResetRoute && req.method === "POST") {
+      const body = (await req.json().catch(() => ({}))) as { session_id?: string };
+      if (!body.session_id) {
+        return withCorsEnv(req, env, json({ error: "Missing session_id" }, 400));
+      }
+      return withCorsEnv(req, env, json({ ok: true, session_id: body.session_id }));
     }
 
     const isWidgetRoute =
@@ -282,17 +357,18 @@ export default {
 
     if (isWidgetRoute && !isSessionRoute) {
       const tenant = getTenant(url);
-      if (!tenant) return withCors(req, json({ error: "Missing tenant" }, 400));
+      if (!tenant) return withCorsEnv(req, env, json({ error: "Missing tenant" }, 400));
 
       const cfg = TENANTS[tenant];
-      if (!cfg) return withCors(req, json({ error: "Invalid tenant" }, 400));
+      if (!cfg) return withCorsEnv(req, env, json({ error: "Invalid tenant" }, 404));
 
-      return withCors(req, json({ tenant, ...cfg }));
+      return withCorsEnv(req, env, json({ tenant, ...cfg }));
     }
 
     if (pathname === "/") {
-      return withCors(
+      return withCorsEnv(
         req,
+        env,
         json({
           status: "ok",
           endpoints: [
@@ -312,6 +388,10 @@ export default {
             "/api/widget?tenant=<tenant>",
             "/widget/session",
             "/api/widget/session",
+            "/widget/message",
+            "/api/widget/message",
+            "/widget/reset",
+            "/api/widget/reset",
             "/widget",
             "/api/widget",
           ],
@@ -320,6 +400,6 @@ export default {
       );
     }
 
-    return withCors(req, json({ error: "Not found" }, 404));
+    return withCorsEnv(req, env, json({ error: "Not found" }, 404));
   },
 };

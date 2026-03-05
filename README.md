@@ -130,7 +130,7 @@ npm run preview
 | `data-position` | br, bl, tr, tl | br |
 | `data-mode` | chat, voice, voice+chat | voice+chat |
 | `data-primary-color` | Color CSS (#xxx, rgb) | #2563eb |
-| `data-api-base` | URL base del API | `window.location.origin` |
+| `data-api-base` | URL base del API | `https://solai-widget-api.wesolailabs.workers.dev` |
 
 ## Cómo añadir nuevos tenants
 
@@ -167,13 +167,28 @@ npm run preview
 
 ## API Backend
 
-### GET /api/widget/session?tenant=xxx
+### GET /widget/tenant?tenant=<slug>
+
+Devuelve config del tenant.
+
+### POST /widget/session
+
+Body:
+
+```json
+{
+  "tenant": "demo-dental",
+  "client_session_id": "optional-client-id"
+}
+```
 
 Devuelve:
 
 ```json
 {
   "tenant": "demo-dental",
+  "session_id": "client-id-or-generated-uuid",
+  "ttl_seconds": 900,
   "agentId": "abc123",
   "signedUrl": "wss://api.elevenlabs.io/v1/convai/conversation?...",
   "branding": { "name": "...", "primaryColor": "...", "logoUrl": "..." }
@@ -181,3 +196,98 @@ Devuelve:
 ```
 
 El cliente usa `signedUrl` con el SDK de ElevenLabs para conectar sin exponer la API key.
+
+### POST /widget/message
+
+Body:
+
+```json
+{
+  "session_id": "uuid",
+  "text": "Hola",
+  "idempotency_key": "uuid"
+}
+```
+
+Respuesta actual: `501` (el transporte de mensajes del widget va por websocket de ElevenLabs).
+
+### POST /widget/reset
+
+Body:
+
+```json
+{
+  "session_id": "uuid"
+}
+```
+
+Respuesta:
+
+```json
+{
+  "ok": true,
+  "session_id": "uuid"
+}
+```
+
+### GET /health
+
+Estado del worker.
+
+## Local (rápido y correcto)
+
+### Opción 1: Widget local apuntando a Worker de prod
+
+```bash
+npm run dev:widget
+```
+
+Abre:
+
+```text
+http://localhost:5173/?apiBase=https://solai-widget-api.wesolailabs.workers.dev
+```
+
+Embed de ejemplo:
+
+```html
+<script
+  src="https://tu-cdn.com/solai-widget.js"
+  data-tenant="demo-dental"
+  data-api-base="https://solai-widget-api.wesolailabs.workers.dev"
+  data-position="br"
+  data-mode="voice+chat"
+></script>
+```
+
+### Opción 2: Worker local con wrangler dev
+
+```bash
+npm run dev:widget:worker
+```
+
+Abre:
+
+```text
+http://localhost:5173/?apiBase=http://127.0.0.1:8787
+```
+
+También puedes fijarlo por variable de entorno:
+
+```bash
+VITE_WIDGET_API_BASE=http://127.0.0.1:8787 npm run dev:widget
+```
+
+## CORS (worker)
+
+Orígenes permitidos por defecto:
+
+- `http://localhost:3000`
+- `http://localhost:5173`
+- `https://solai-widget-api.wesolailabs.workers.dev`
+
+Override por env:
+
+```bash
+WIDGET_ALLOWED_ORIGINS="http://localhost:3000,http://localhost:5173,https://solai-widget-api.wesolailabs.workers.dev"
+```

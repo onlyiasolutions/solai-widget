@@ -14,9 +14,11 @@
 </head>
 <body>
   <h1>SolAI Widget Demo (Dev)</h1>
-  <p>Widget cargado desde Vite dev server. API en localhost:3000.</p>
+  <p>Widget cargado desde Vite dev server. Define <code>?apiBase=http://127.0.0.1:8787</code> para Worker local.</p>
   <script>
-    window.SOLA_WIDGET_CONFIG = { tenant: 'demo-dental', apiBase: 'http://localhost:3000', position: 'br', mode: 'voice+chat' };
+    const qs = new URLSearchParams(window.location.search);
+    const apiBase = qs.get('apiBase') || 'https://solai-widget-api.wesolailabs.workers.dev';
+    window.SOLA_WIDGET_CONFIG = { tenant: 'demo-dental', apiBase, position: 'br', mode: 'voice+chat' };
   </script>
   <script type="module" src="/src/main.ts"></script>
 </body>

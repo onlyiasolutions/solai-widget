@@ -14,4 +14,4 @@ export const TOOL_LIMITS: ToolLimits = {
   idempotencyTtlMs: 10 * 60_000,
 };
 
-export const FIRST_MESSAGE_MODE = "greet_only" as const;
+export const FIRST_MESSAGE_MODE = "platform_managed" as const;

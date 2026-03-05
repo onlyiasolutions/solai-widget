@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { readFile } from "fs/promises";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { SAFE_SYSTEM_PROMPT } from "../safety-system-prompt";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -192,6 +193,10 @@ widgetRouter.get("/session", async (req: Request, res: Response) => {
       tz: TZ,
       now_iso: nowIsoInTZ(now, TZ),
       today_human: todayHuman(now, TZ),
+      first_message_mode: "platform_managed",
+      allow_agent_first_message: true,
+      safe_system_prompt: SAFE_SYSTEM_PROMPT,
+      safe_system_prompt_version: "2026-03-05",
     };
 
     res.json({

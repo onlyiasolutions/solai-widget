@@ -6,6 +6,8 @@
   "workspaces": ["widget", "server"],
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:widget\"",
+    "dev:worker": "npm run dev:worker -w server",
+    "dev:widget:worker": "concurrently \"npm run dev:worker\" \"npm run dev:widget\"",
     "dev:server": "npm run dev -w server",
     "dev:widget": "npm run dev -w widget",
     "build": "npm run build -w widget",

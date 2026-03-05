@@ -22,19 +22,25 @@ export type WidgetConfig = {
   mode: "chat" | "voice" | "voice+chat";
   primaryColor: string;
   sessionTtlMinutes?: number;
-  firstMessageMode?: "greet_only";
+  firstMessageMode?: "greet_only" | "platform_managed";
 };
 
 export type DynamicVars = {
   tz: string;
   now_iso: string;
   today_human: string;
+  first_message_mode?: "greet_only" | "platform_managed";
+  allow_agent_first_message?: boolean;
+  safe_system_prompt?: string;
+  safe_system_prompt_version?: string;
 };
 
 export type SessionData = {
   tenant: string;
   agentId: string;
   signedUrl: string;
+  session_id?: string;
+  ttl_seconds?: number;
   branding: { name?: string; primaryColor?: string; logoUrl?: string };
   dynamic_variables?: DynamicVars; // <-- NUEVO
 };
@@ -251,6 +257,18 @@ export class SolAIWidget {
     this.log("suppressing greeting", trimmed);
     this.suppressedGreetingOnce = true;
     return true;
+  }
+
+  private buildPromptOverrides() {
+    const safePrompt = this.dynamicVars?.safe_system_prompt?.trim();
+    if (!safePrompt) return undefined;
+    return {
+      agent: {
+        prompt: {
+          prompt: safePrompt,
+        },
+      },
+    };
   }
 
   mount() {
@@ -499,35 +517,46 @@ export class SolAIWidget {
 
     const tenant = String(this.config.tenant ?? "").trim();
 
-    // Normaliza apiBase
-    const baseRaw = String(this.config.apiBase ?? "").trim();
-    const baseNoSlash = baseRaw.replace(/\/+$/, "");
-    const base =
-      baseNoSlash.startsWith("http://") || baseNoSlash.startsWith("https://")
-        ? baseNoSlash
-        : `https://${baseNoSlash.replace(/^\/\//, "")}`;
+    const normalizeBase = (raw: string) => {
+      const noSlash = raw.replace(/\/+$/, "");
+      if (noSlash.startsWith("http://") || noSlash.startsWith("https://")) return noSlash;
+      if (noSlash.startsWith("//")) return `https:${noSlash}`;
+      return `https://${noSlash}`;
+    };
+    const joinUrl = (baseUrl: string, path: string) =>
+      `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 
-    const apiPrefix = base.endsWith("/api") ? base : `${base}/api`;
-    const rootPrefix = base;
+    const base = normalizeBase(String(this.config.apiBase ?? "").trim());
+    const rootBase = base.endsWith("/api") ? base.slice(0, -4) : base;
+    const apiBase = base.endsWith("/api") ? base : joinUrl(base, "/api");
 
-    const primaryUrl = `${apiPrefix}/widget/session?tenant=${encodeURIComponent(tenant)}`;
-    const primaryUrlAlt = `${rootPrefix}/widget/session?tenant=${encodeURIComponent(tenant)}`;
-    const fallbackUrl = `${apiPrefix}/widget/tenant?tenant=${encodeURIComponent(tenant)}`;
-    const fallbackUrlAlt = `${rootPrefix}/widget/tenant?tenant=${encodeURIComponent(tenant)}`;
+    const postSessionUrls = [joinUrl(rootBase, "/widget/session"), joinUrl(apiBase, "/widget/session")];
+    const getSessionUrls = [
+      `${joinUrl(rootBase, "/widget/session")}?tenant=${encodeURIComponent(tenant)}`,
+      `${joinUrl(apiBase, "/widget/session")}?tenant=${encodeURIComponent(tenant)}`,
+    ];
+    const tenantUrls = [
+      `${joinUrl(rootBase, "/widget/tenant")}?tenant=${encodeURIComponent(tenant)}`,
+      `${joinUrl(apiBase, "/widget/tenant")}?tenant=${encodeURIComponent(tenant)}`,
+    ];
+    const candidates = [...postSessionUrls, ...getSessionUrls, ...tenantUrls];
 
-    this.log("fetchSession: requesting signedUrl", { primaryUrl, fallbackUrl, tenant });
+    this.log("fetchSession: requesting signedUrl", { tenant, candidates });
 
-    const tryFetch = async (u: string) =>
-      fetch(u, {
-        method: "GET",
+    const tryFetch = async (u: string) => {
+      const isPostSession = postSessionUrls.includes(u);
+      return fetch(u, {
+        method: isPostSession ? "POST" : "GET",
         headers: {
           Accept: "application/json",
+          "Content-Type": "application/json",
           "x-tenant": tenant,
           "x-solai-tenant": tenant,
         },
+        body: isPostSession ? JSON.stringify({ tenant, client_session_id: this.sessionId }) : undefined,
       });
+    };
 
-    const candidates = [primaryUrl, primaryUrlAlt, fallbackUrl, fallbackUrlAlt];
     let res: Response | null = null;
     let usedUrl: string | null = null;
 
@@ -654,6 +683,7 @@ export class SolAIWidget {
         signedUrl: session.signedUrl,
         connectionType: "websocket",
         textOnly: true,
+        overrides: this.buildPromptOverrides(),
 
         // compat
         dynamic_variables: this.dynamicVars ?? undefined,
@@ -833,6 +863,7 @@ export class SolAIWidget {
         signedUrl: session.signedUrl,
         connectionType: "websocket",
         textOnly: false,
+        overrides: this.buildPromptOverrides(),
 
         // compat
         dynamic_variables: this.dynamicVars ?? undefined,

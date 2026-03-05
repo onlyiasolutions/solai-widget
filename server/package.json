@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:worker": "wrangler dev",
     "start": "tsx src/index.ts",
     "deploy": "wrangler deploy",
     "typecheck": "tsc -p tsconfig.json --noEmit"
