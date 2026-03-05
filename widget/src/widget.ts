@@ -31,6 +31,7 @@ export type DynamicVars = {
   today_human: string;
   first_message_mode?: "greet_only" | "platform_managed";
   allow_agent_first_message?: boolean;
+  allow_prompt_override?: boolean;
   safe_system_prompt?: string;
   safe_system_prompt_version?: string;
 };
@@ -97,6 +98,15 @@ export class SolAIWidget {
   private readonly sessionId = createTraceId();
   private toolGateway: ToolExecutionGateway | null = null;
   private hasShownInitialGreeting = false;
+  private activeTenant: string | null = null;
+  private activeServerSessionId: string | null = null;
+  private activeSignedUrl: string | null = null;
+  private chatStatus: "connected" | "connecting" | "disconnected" = "disconnected";
+  private pendingAckTimerId: ReturnType<typeof setTimeout> | null = null;
+  private pendingAckTraceId: string | null = null;
+  private pendingAckText: string | null = null;
+  private pendingAckRetries = 0;
+  private readonly ACK_TIMEOUT_MS = 3_000;
   private autoReconnectAttempts = 0;
   private autoReconnectWindowStart = 0;
   private readonly AUTO_RECONNECT_LIMIT = 2;
@@ -142,6 +152,8 @@ export class SolAIWidget {
     } catch {
       // ignorar errores de acceso a localStorage
     }
+
+    this.installWsTraceTap();
   }
 
   private log(...args: unknown[]) {
@@ -235,6 +247,10 @@ export class SolAIWidget {
   }
 
   private shouldSuppressGreeting(text: string): boolean {
+    // En modo platform_managed queremos mostrar el primer mensaje del agente
+    // (si existe) tal cual, no suprimirlo.
+    if (this.config.firstMessageMode === "platform_managed") return false;
+
     if (this.firstUserMessageSentAt == null) return false;
     if (this.suppressedGreetingOnce) return false;
     if (!this.sessionStartedAt) return false;
@@ -259,7 +275,121 @@ export class SolAIWidget {
     return true;
   }
 
+  private isAgentSource(source: unknown): boolean {
+    const s = String(source ?? "").toLowerCase();
+    return s === "agent" || s === "ai";
+  }
+
+  private installWsTraceTap() {
+    if (!this.debug || typeof window === "undefined") return;
+    const w = window as unknown as { WebSocket: typeof WebSocket; __SOLAI_WS_TAP__?: boolean };
+    if (w.__SOLAI_WS_TAP__) return;
+    const NativeWS = w.WebSocket;
+
+    const preview = (raw: unknown) => {
+      try {
+        if (typeof raw === "string") return raw.slice(0, 700);
+        if (raw instanceof ArrayBuffer) return `[ArrayBuffer bytes=${raw.byteLength}]`;
+        if (typeof Blob !== "undefined" && raw instanceof Blob) return `[Blob bytes=${raw.size}]`;
+        return String(raw);
+      } catch {
+        return "[unprintable]";
+      }
+    };
+
+    const Wrapped = function (
+      this: WebSocket,
+      url: string | URL,
+      protocols?: string | string[]
+    ) {
+      const ws = protocols ? new NativeWS(url, protocols) : new NativeWS(url);
+      const wsUrl = String(url);
+      const trace = wsUrl.includes("elevenlabs") || wsUrl.includes("convai");
+      if (trace) {
+        // eslint-disable-next-line no-console
+        console.log("[SolAI][WS] onopen(url) pending", wsUrl);
+        ws.addEventListener("open", () => {
+          // eslint-disable-next-line no-console
+          console.log("[SolAI][WS] onopen(url)", wsUrl);
+        });
+        ws.addEventListener("message", (ev) => {
+          // eslint-disable-next-line no-console
+          console.log("[SolAI][WS] onmessage(raw)", preview((ev as MessageEvent).data));
+        });
+        ws.addEventListener("close", (ev) => {
+          // eslint-disable-next-line no-console
+          console.log("[SolAI][WS] onclose", { url: wsUrl, code: ev.code, reason: ev.reason });
+        });
+        ws.addEventListener("error", (ev) => {
+          // eslint-disable-next-line no-console
+          console.log("[SolAI][WS] onerror", { url: wsUrl, event: ev });
+        });
+        const nativeSend = ws.send.bind(ws);
+        ws.send = ((data: string | ArrayBufferLike | Blob | ArrayBufferView) => {
+          // eslint-disable-next-line no-console
+          console.log("[SolAI][WS] send(raw)", preview(data));
+          nativeSend(data);
+        }) as WebSocket["send"];
+      }
+      return ws;
+    } as unknown as typeof WebSocket;
+
+    Wrapped.prototype = NativeWS.prototype;
+    Object.defineProperty(Wrapped, "CONNECTING", { value: NativeWS.CONNECTING });
+    Object.defineProperty(Wrapped, "OPEN", { value: NativeWS.OPEN });
+    Object.defineProperty(Wrapped, "CLOSING", { value: NativeWS.CLOSING });
+    Object.defineProperty(Wrapped, "CLOSED", { value: NativeWS.CLOSED });
+    w.WebSocket = Wrapped;
+    w.__SOLAI_WS_TAP__ = true;
+    this.log("WS trace tap installed");
+  }
+
+  private clearAckWait() {
+    if (this.pendingAckTimerId) {
+      clearTimeout(this.pendingAckTimerId);
+      this.pendingAckTimerId = null;
+    }
+    this.pendingAckTraceId = null;
+    this.pendingAckText = null;
+  }
+
+  private markAgentAck(reason: string) {
+    if (!this.pendingAckTraceId) return;
+    this.log("chat ack received", {
+      reason,
+      trace_id: this.pendingAckTraceId,
+      tenant: this.activeTenant ?? this.config.tenant,
+      session_id: this.activeServerSessionId ?? this.sessionId,
+    });
+    this.clearAckWait();
+    this.pendingAckRetries = 0;
+  }
+
+  private maybeShowGreetingForSession(session: SessionData) {
+    if (this.config.firstMessageMode !== "greet_only") return;
+    const tenant = session.tenant || this.config.tenant;
+    const sid = session.session_id ?? this.sessionId;
+    const ttlMs = (session.ttl_seconds ?? 900) * 1000;
+    const key = `SOLAI_GREETING_SEEN_${tenant}_${sid}`;
+    const now = Date.now();
+    try {
+      const existing = window.sessionStorage.getItem(key);
+      if (existing) {
+        const exp = parseInt(existing, 10);
+        if (!Number.isNaN(exp) && exp > now) return;
+      }
+      window.sessionStorage.setItem(key, String(now + ttlMs));
+    } catch {
+      // ignore
+    }
+    this.addMessage("agent", "Hola, soy Auri. ¿En qué te puedo ayudar hoy?");
+  }
+
   private buildPromptOverrides() {
+    if (this.dynamicVars?.allow_prompt_override !== true) {
+      this.log("prompt override disabled (agent config does not allow it)");
+      return undefined;
+    }
     const safePrompt = this.dynamicVars?.safe_system_prompt?.trim();
     if (!safePrompt) return undefined;
     return {
@@ -369,7 +499,6 @@ export class SolAIWidget {
 
     this.setUIForMode();
     this.startInactivityCheck();
-    this.showInitialGreetingIfNeeded();
   }
 
   private showInitialGreetingIfNeeded() {
@@ -419,6 +548,17 @@ export class SolAIWidget {
     requestAnimationFrame(() => {
       this.panel?.classList.add("solai-panel-open");
     });
+
+    // Preconecta sesión al abrir para permitir primer mensaje automático del agente
+    // antes del primer input del usuario.
+    if (
+      this.config.mode !== "voice" &&
+      this.config.firstMessageMode === "platform_managed" &&
+      !this.conversation &&
+      this.messages.length === 0
+    ) {
+      this.ensureChatSession().catch((e) => this.log("openPanel ensureChatSession failed", e));
+    }
   }
 
   private collapsePanel() {
@@ -630,6 +770,9 @@ export class SolAIWidget {
     // Guardamos branding + dynamic vars en memoria
     this.branding = sessionData.branding ?? null;
     this.dynamicVars = sessionData.dynamic_variables ?? null;
+    this.activeTenant = sessionData.tenant ?? tenant;
+    this.activeServerSessionId = sessionData.session_id ?? null;
+    this.activeSignedUrl = sessionData.signedUrl ?? null;
 
     this.totalSessionsCreated += 1;
     this.log("fetchSession: ok", {
@@ -637,6 +780,8 @@ export class SolAIWidget {
       hasBranding: !!sessionData.branding,
       hasDynamicVars: !!sessionData.dynamic_variables,
       totalSessionsCreated: this.totalSessionsCreated,
+      signedUrl: sessionData.signedUrl,
+      serverSessionId: sessionData.session_id ?? null,
     });
 
     return sessionData;
@@ -669,6 +814,11 @@ export class SolAIWidget {
     try {
       const session = await this.fetchSession();
       this.log("session fetched ok");
+      this.log("chat using signedUrl", {
+        signedUrl: session.signedUrl,
+        tenant: session.tenant ?? this.config.tenant,
+        session_id: session.session_id ?? this.sessionId,
+      });
       this.toolGateway = new ToolExecutionGateway({
         apiBase: this.config.apiBase,
         tenantId: this.config.tenant,
@@ -694,7 +844,8 @@ export class SolAIWidget {
           const text = (msg as { message?: string }).message;
           this.log("chat onMessage", msg.source, msg.type, text);
           if (text) {
-            if (msg.source === "agent") {
+            if (this.isAgentSource(msg.source)) {
+              this.markAgentAck("onMessage");
               this.clearResponseTimeout();
               if (!this.shouldSuppressGreeting(text)) {
                 this.addMessage("agent", text);
@@ -711,6 +862,7 @@ export class SolAIWidget {
           if (part.type === "start") this.agentStreamingText = "";
           if (part.text) this.agentStreamingText += part.text;
           if (part.type === "stop") {
+            this.markAgentAck("stream_stop");
             this.clearResponseTimeout();
             if (this.agentStreamingText.trim()) {
               const full = this.agentStreamingText.trim();
@@ -726,11 +878,19 @@ export class SolAIWidget {
 
         onStatusChange: (s: { status?: string }) => {
           if (s.status === "connected") {
+            this.chatStatus = "connected";
             this.log("chat ws connected");
             this.setState("idle");
           }
-          if (s.status === "connecting") this.setState("connecting");
-          if (s.status === "disconnected") this.setState("idle");
+          if (s.status === "connecting") {
+            this.chatStatus = "connecting";
+            this.setState("connecting");
+          }
+          if (s.status === "disconnected") {
+            this.chatStatus = "disconnected";
+            this.conversation = null;
+            this.setState("idle");
+          }
         },
 
         onError: (err: unknown) => {
@@ -762,12 +922,14 @@ export class SolAIWidget {
 
       this.conversation = conversation;
       this.callActive = false;
+      this.chatStatus = "connected";
       this.updateLastActivity();
       this.resetAutoReconnectWindow();
       this.sessionStartedAt = Date.now();
       this.suppressedGreetingOnce = false;
       this.setState("idle");
       this.updateCallButton();
+      this.maybeShowGreetingForSession(session);
       this.log("connectChat: sesión texto activa");
       return true;
     } catch (e) {
@@ -874,7 +1036,7 @@ export class SolAIWidget {
           const text = (msg as { message?: string }).message;
           this.logVoice("onMessage", msg.source, msg.type, text);
           if (text) {
-            if (msg.source === "agent") this.addMessage("agent", text);
+            if (this.isAgentSource(msg.source)) this.addMessage("agent", text);
             if (msg.source === "user") this.addMessage("user", text);
           }
         },
@@ -952,11 +1114,13 @@ export class SolAIWidget {
 
   private endCurrentSession(reason: string = "manual") {
     this.clearResponseTimeout();
+    this.clearAckWait();
     this.stopVolumePulse();
     if (this.conversation) {
       this.conversation.endSession().catch(() => {});
       this.conversation = null;
     }
+    this.chatStatus = "disconnected";
     this.callActive = false;
     this.updateCallButton();
     this.log("endCurrentSession: sesión cerrada. reason=", reason);
@@ -1019,6 +1183,8 @@ export class SolAIWidget {
 
   private disconnect() {
     this.clearResponseTimeout();
+    this.clearAckWait();
+    this.chatStatus = "disconnected";
     this.endCurrentSession("disconnect");
     this.setState("idle");
   }
@@ -1060,7 +1226,86 @@ export class SolAIWidget {
       return;
     }
 
+    if (this.chatStatus !== "connected") {
+      this.log("sendText: chat not connected, reconnecting", { status: this.chatStatus });
+      this.endCurrentSession("reconnect_before_send");
+      const reok = await this.ensureChatSession();
+      if (!reok || !this.conversation) {
+        this.setState("error");
+        return;
+      }
+    }
+
     this.startResponseTimeout();
+    const traceId = createTraceId();
+    const idempotencyKey = `${this.sessionId}:${Date.now()}`;
+    const tenant = this.activeTenant ?? this.config.tenant;
+    const session_id = this.activeServerSessionId ?? this.sessionId;
+    const payload = {
+      tenant,
+      session_id,
+      message: { text },
+      trace_id: traceId,
+      idempotency_key: idempotencyKey,
+    };
+    this.log("chat send payload", payload);
+
+    try {
+      const conv = this.conversation as unknown as {
+        sendContextualUpdate?: (s: string) => void;
+      };
+      if (typeof conv.sendContextualUpdate === "function") {
+        conv.sendContextualUpdate(
+          JSON.stringify({
+            type: "client_message_meta",
+            tenant,
+            session_id,
+            message: { text },
+            trace_id: traceId,
+            idempotency_key: idempotencyKey,
+          })
+        );
+      }
+    } catch (e) {
+      this.log("sendContextualUpdate failed", e);
+    }
+
+    this.pendingAckTraceId = traceId;
+    this.pendingAckText = text;
+    if (this.pendingAckTimerId) clearTimeout(this.pendingAckTimerId);
+    this.pendingAckTimerId = setTimeout(async () => {
+      this.pendingAckTimerId = null;
+      if (!this.pendingAckTraceId || !this.pendingAckText) return;
+      if (this.pendingAckRetries >= 1) {
+        this.log("ack timeout final (no retry left)", {
+          trace_id: this.pendingAckTraceId,
+          tenant: this.activeTenant ?? this.config.tenant,
+          session_id: this.activeServerSessionId ?? this.sessionId,
+        });
+        return;
+      }
+
+      this.pendingAckRetries += 1;
+      const retryTrace = this.pendingAckTraceId;
+      const retryText = this.pendingAckText;
+      this.log("ack timeout: reconnect + retry once", { trace_id: retryTrace, retry: this.pendingAckRetries });
+      this.endCurrentSession("ack_timeout_retry");
+      const reok = await this.ensureChatSession();
+      if (!reok || !this.conversation) {
+        this.setState("error");
+        return;
+      }
+      this.startResponseTimeout();
+      this.conversation.sendUserMessage(retryText);
+      this.log("chat resend payload", {
+        tenant: this.activeTenant ?? this.config.tenant,
+        session_id: this.activeServerSessionId ?? this.sessionId,
+        message: { text: retryText },
+        trace_id: retryTrace,
+        retry: this.pendingAckRetries,
+      });
+    }, this.ACK_TIMEOUT_MS);
+
     this.conversation.sendUserMessage(text);
     if (DEV) console.log("[SolAI] user text sent");
   }

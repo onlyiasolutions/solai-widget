@@ -1,22 +1,37 @@
 {
   "demo-gestoria": {
     "agentId": "agent_4901khbsjs8tfmfsybvkfhhp0t68",
-    "branding": { "name": "Gestoría Demo", "primaryColor": "#2563eb", "logoUrl": "" }
+    "branding": { "name": "Gestoría Demo", "primaryColor": "#2563eb", "logoUrl": "" },
+    "allowed_origins": [
+      "https://gestordemo.wesolai.com"
+    ]
   },
   "demo-dental": {
     "agentId": "agent_9801khbsbydnfywb6h8nhk9me27h",
-    "branding": { "name": "Dental Demo", "primaryColor": "#059669", "logoUrl": "" }
+    "branding": { "name": "Dental Demo", "primaryColor": "#059669", "logoUrl": "" },
+    "allowed_origins": [
+      "https://dentalia.wesolai.com"
+    ]
   },
   "demo-taller": {
     "agentId": "agent_9901khbrnec4e97ryd3x2p3qp9rh",
-    "branding": { "name": "Taller Demo", "primaryColor": "#dc2626", "logoUrl": "" }
+    "branding": { "name": "Taller Demo", "primaryColor": "#dc2626", "logoUrl": "" },
+    "allowed_origins": [
+      "https://autodemo.wesolai.com"
+    ]
   },
   "demo-salon": {
     "agentId": "agent_2401khbsrhaxe6fa8e75ca4vhxsx",
-    "branding": { "name": "Salón Demo", "primaryColor": "#7c3aed", "logoUrl": "" }
+    "branding": { "name": "Salón Demo", "primaryColor": "#7c3aed", "logoUrl": "" },
+    "allowed_origins": [
+      "https://studio.wesolai.com"
+    ]
   },
   "nexo-home": {
     "agentId": "agent_5101kjae2qs5e58vayd68brssthv",
-    "branding": { "name": "Nexo Home", "primaryColor": "#7c3aed", "logoUrl": "" }
+    "branding": { "name": "Nexo Home", "primaryColor": "#7c3aed", "logoUrl": "" },
+    "allowed_origins": [
+      "https://wesolai.com"
+    ]
   }
 }

@@ -4,7 +4,7 @@ import { logTrace, traceIdFromReq } from "./telemetry";
 import { SAFE_SYSTEM_PROMPT } from "./safety-system-prompt";
 
 type Branding = { name: string; primaryColor: string; logoUrl?: string };
-type TenantConfig = { agentId: string; branding: Branding };
+type TenantConfig = { agentId: string; branding: Branding; allowed_origins?: string[] };
 type TenantsMap = Record<string, TenantConfig>;
 
 export interface Env {
@@ -12,6 +12,7 @@ export interface Env {
   N8N_TOOL_BASE_URL?: string;
   TENANT_KILL_SWITCH?: string;
   WIDGET_ALLOWED_ORIGINS?: string;
+  ENVIRONMENT?: string;
 }
 
 const TENANTS: TenantsMap = tenants as unknown as TenantsMap;
@@ -26,57 +27,74 @@ function json(data: unknown, status = 200, extraHeaders: HeadersInit = {}) {
   });
 }
 
-const DEFAULT_ALLOWED_ORIGINS = new Set([
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "https://solai-widget-api.wesolailabs.workers.dev",
-]);
+const CORS_ALLOW_METHODS = "GET,POST,OPTIONS";
+const CORS_ALLOW_HEADERS =
+  "Content-Type, Authorization, X-Solai-Tenant, X-Tenant, X-Idempotency-Key";
+const CORS_MAX_AGE = "86400";
+const DEV_ORIGINS = new Set(["http://localhost:3000", "http://localhost:5173"]);
 
-function resolveAllowedOrigins(env?: Env): Set<string> {
-  const origins = new Set(DEFAULT_ALLOWED_ORIGINS);
-  const fromEnv = env?.WIDGET_ALLOWED_ORIGINS?.split(",").map((x) => x.trim()).filter(Boolean) ?? [];
-  for (const origin of fromEnv) origins.add(origin);
-  return origins;
+function isWidgetPath(pathname: string) {
+  return /^\/(?:api\/)?widget(?:\/|$)/.test(pathname);
 }
 
-function corsHeaders(req: Request, env?: Env): HeadersInit {
-  const originHeader = req.headers.get("Origin");
-  const allowOrigins = resolveAllowedOrigins(env);
-  const allowOrigin =
-    originHeader && allowOrigins.has(originHeader)
-      ? originHeader
-      : originHeader
-        ? Array.from(allowOrigins)[0]
-        : "*";
+function getTenantForCors(req: Request, url: URL): string | null {
+  const q = url.searchParams.get("tenant")?.trim();
+  if (q) return q;
 
-  const reqHeaders = req.headers.get("Access-Control-Request-Headers") || "Content-Type, Authorization";
-  const reqMethod = req.headers.get("Access-Control-Request-Method") || "GET,POST,OPTIONS";
+  const hTenant = req.headers.get("x-tenant")?.trim();
+  if (hTenant) return hTenant;
 
-  const headers: HeadersInit = {
-    "Access-Control-Allow-Origin": allowOrigin,
+  const hSolai = req.headers.get("x-solai-tenant")?.trim();
+  if (hSolai) return hSolai;
+
+  const m = url.pathname.match(/^\/(?:api\/)?widget\/(?:tenant|config)\/([^/?#]+)/);
+  if (m?.[1]) return decodeURIComponent(m[1]).trim();
+
+  return null;
+}
+
+function resolveTenantAllowedOrigins(cfg: TenantConfig | undefined, env: Env): Set<string> {
+  const allowed = new Set((cfg?.allowed_origins ?? []).map((x) => x.trim()).filter(Boolean));
+  const envOrigins = env.WIDGET_ALLOWED_ORIGINS?.split(",").map((x) => x.trim()).filter(Boolean) ?? [];
+  for (const origin of envOrigins) allowed.add(origin);
+  return allowed;
+}
+
+function isOriginAllowedForTenant(origin: string, cfg: TenantConfig | undefined, env: Env) {
+  const allowed = resolveTenantAllowedOrigins(cfg, env);
+  if (allowed.has(origin)) return true;
+
+  if ((env.ENVIRONMENT ?? "").toLowerCase() === "dev" && DEV_ORIGINS.has(origin)) return true;
+
+  return false;
+}
+
+function corsBaseHeaders(): HeadersInit {
+  return {
     Vary: "Origin",
-    "Access-Control-Allow-Headers": reqHeaders,
-    "Access-Control-Allow-Methods": reqMethod,
+    "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
+    "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
+    "Access-Control-Max-Age": CORS_MAX_AGE,
   };
-
-  if (originHeader) {
-    (headers as Record<string, string>)["Access-Control-Allow-Credentials"] = "true";
-  }
-
-  return headers;
-}
-
-function withCors(req: Request, res: Response) {
-  const h = new Headers(res.headers);
-  const ch = corsHeaders(req);
-  for (const [k, v] of Object.entries(ch)) h.set(k, v as string);
-  return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
 }
 
 function withCorsEnv(req: Request, env: Env, res: Response) {
   const h = new Headers(res.headers);
-  const ch = corsHeaders(req, env);
-  for (const [k, v] of Object.entries(ch)) h.set(k, v as string);
+  const url = new URL(req.url);
+  const origin = req.headers.get("Origin")?.trim();
+  const pathname = url.pathname !== "/" ? url.pathname.replace(/\/+$/, "") : "/";
+
+  for (const [k, v] of Object.entries(corsBaseHeaders())) h.set(k, v as string);
+
+  if (origin && isWidgetPath(pathname)) {
+    const tenant = getTenantForCors(req, url);
+    const cfg = tenant ? TENANTS[tenant] : undefined;
+    if (isOriginAllowedForTenant(origin, cfg, env)) {
+      h.set("Access-Control-Allow-Origin", origin);
+      h.set("Access-Control-Allow-Credentials", "true");
+    }
+  }
+
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
 }
 
@@ -113,13 +131,29 @@ function getClientIp(req: Request) {
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     (globalThis as any).SOLAI_TENANT_KILL_SWITCH = env.TENANT_KILL_SWITCH || "";
-
-    if (req.method === "OPTIONS") {
-      return withCorsEnv(req, env, new Response(null, { status: 204 }));
-    }
-
     const url = new URL(req.url);
     const pathname = url.pathname !== "/" ? url.pathname.replace(/\/+$/, "") : "/";
+    const widgetRoute = isWidgetPath(pathname);
+    const origin = req.headers.get("Origin")?.trim();
+
+    if (widgetRoute && origin) {
+      const tenantForCors = getTenantForCors(req, url);
+      const cfgForCors = tenantForCors ? TENANTS[tenantForCors] : undefined;
+      const allowed = !!tenantForCors && isOriginAllowedForTenant(origin, cfgForCors, env);
+
+      if (req.method === "OPTIONS") {
+        if (!allowed) {
+          return withCorsEnv(req, env, json({ error: "cors_origin_not_allowed" }, 403));
+        }
+        return withCorsEnv(req, env, new Response(null, { status: 204 }));
+      }
+
+      if (!allowed && (req.method === "GET" || req.method === "POST")) {
+        return withCorsEnv(req, env, json({ error: "cors_origin_not_allowed" }, 403));
+      }
+    } else if (req.method === "OPTIONS") {
+      return withCorsEnv(req, env, new Response(null, { status: 204 }));
+    }
 
     if (pathname === "/health") {
       return withCorsEnv(req, env, json({ status: "ok", hasElevenKey: !!env.ELEVENLABS_API_KEY }));
