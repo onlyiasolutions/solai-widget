@@ -112,16 +112,16 @@ export function getStyles(primaryColor: string): string {
 .solai-chat-shell::after{
   content:"";
   position:absolute;
-  left: 2%;
-  width: 96%;
-  bottom: -34px;
-  height: 84px;
-  border-radius: 999px;
+  inset: -28px;
+  border-radius: 40px;
   pointer-events:none;
   z-index:-2;
   opacity: 0;
-  background: radial-gradient(60% 100% at 50% 30%, color-mix(in srgb, var(--widget-accent) 20%, transparent), rgba(59,130,246,0) 75%);
-  filter: blur(22px);
+  background: radial-gradient(68% 68% at 50% 50%, color-mix(in srgb, var(--widget-accent) 28%, transparent), rgba(59,130,246,0) 74%);
+  filter: blur(24px);
+  box-shadow:
+    0 0 44px color-mix(in srgb, var(--widget-accent) 24%, transparent),
+    0 0 18px color-mix(in srgb, var(--widget-accent) 18%, transparent);
   transition: opacity 220ms cubic-bezier(.16,1,.3,1);
 }
 

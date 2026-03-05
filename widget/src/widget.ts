@@ -570,24 +570,24 @@ export class SolAIWidget {
   private collapsePanel() {
     this.panel?.classList.remove("solai-panel-open");
     this.panel?.classList.add("solai-panel-closing");
+    this.shellEl?.classList.remove("is-open");
     this.button?.classList.remove("open");
     this.button?.setAttribute("aria-label", "Abrir chat");
     setTimeout(() => {
       this.panel!.hidden = true;
       this.panel?.classList.remove("solai-panel-closing");
-      this.shellEl?.classList.remove("is-open");
     }, 220);
   }
 
   private hardClose() {
     this.panel?.classList.remove("solai-panel-open");
     this.panel?.classList.add("solai-panel-closing");
+    this.shellEl?.classList.remove("is-open");
     this.button?.classList.remove("open");
     this.button?.setAttribute("aria-label", "Abrir chat");
     setTimeout(() => {
       this.panel!.hidden = true;
       this.panel?.classList.remove("solai-panel-closing");
-      this.shellEl?.classList.remove("is-open");
       this.endCurrentSession("hard_close");
       this.clearChatMessages();
       this.sessionExpired = false;
