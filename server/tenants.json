@@ -39,7 +39,9 @@
     "agentId": "agent_5101kjae2qs5e58vayd68brssthv",
     "branding": { "name": "Nexo Home", "primaryColor": "#7c3aed", "logoUrl": "" },
     "allowed_origins": [
-      "https://wesolai.com"
+      "https://wesolai.com",
+      "http://localhost:5173",
+      "http://localhost:3000"
     ]
   }
 }
